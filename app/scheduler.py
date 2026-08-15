@@ -73,25 +73,27 @@ def generate_schedule(
     def day_bands(day: DayInfo):
         return bands.get(day.day_type, [])
 
-    def choose_bands_for_full_span(day_bands_list, current_counts):
-        """朝〜夜まで丸ごと空いている希望を、最大2コマ（隣接する2つ）まで
-        に絞る。両方に不足がある隣接ペアがあればロングシフトとして両方を、
-        なければ最も不足しているコマ1つだけを選ぶ"""
-        deficits = [max(0, b.min_required - current_counts[i]) for i, b in enumerate(day_bands_list)]
-        for i in range(len(day_bands_list) - 1):
-            if deficits[i] > 0 and deficits[i + 1] > 0:
+    def choose_bands(overlapped, day_bands_list, current_counts):
+        """複数コマにまたがる希望を、実際に必要な分だけに絞り込む。
+        隣接する2コマの両方が不足していればロングシフトとしてその2つを、
+        そうでなければ最も不足している1コマだけを選ぶ（不足がなければ
+        時間の遅いコマを優先し、無駄に早い時間から入れない）"""
+        deficits = {i: max(0, day_bands_list[i].min_required - current_counts[i]) for i in overlapped}
+        for i in overlapped:
+            if (i + 1) in deficits and deficits[i] > 0 and deficits[i + 1] > 0:
                 return (i, i + 1)
-        best_i = max(range(len(day_bands_list)), key=lambda i: (deficits[i], -i))
+        best_i = max(overlapped, key=lambda i: (deficits[i], i))
         return (best_i,)
 
-    # 初期案: 有効な希望を出した人は全員採用。ただし1日の連続勤務は
-    # 隣接する最大2コマ（午前+午後 or 午後+夜）までとし、朝から夜までの
-    # 通し勤務にはしない。3コマにまたがる希望はコマ単位に絞り込む。
+    # 初期案: 有効な希望を出した人は全員採用。ただし1人の連続勤務は
+    # 実際に必要な分（原則1コマ、隣接する2コマがどちらも不足している
+    # 場合のみ2コマ分のロングシフト）に絞り込み、必要のない早い時間から
+    # の勤務や朝から夜までの通し勤務にはしない。
     candidates = {}  # date -> list[(RequestEntry, (start,end))]
     for day in days:
         b = day_bands(day)
         direct = []
-        full_span = []
+        multi = []
         counts = [0] * len(b)
         for r in requests_by_day.get(day.date, []):
             rng = _expand_range(r, day)
@@ -99,15 +101,15 @@ def generate_schedule(
                 continue
             s, e = rng
             overlapped = [i for i, band in enumerate(b) if _overlaps(s, e, band.start, band.end)]
-            if len(b) < 3 or len(overlapped) <= 2:
+            if len(overlapped) <= 1:
                 direct.append((r, (s, e)))
                 for i in overlapped:
                     counts[i] += 1
             else:
-                full_span.append(r)
+                multi.append((r, overlapped))
 
-        for r in sorted(full_span, key=lambda r: r.staff):
-            chosen = choose_bands_for_full_span(b, counts)
+        for r, overlapped in sorted(multi, key=lambda x: x[0].staff):
+            chosen = choose_bands(overlapped, b, counts)
             s, e = b[chosen[0]].start, b[chosen[-1]].end
             direct.append((r, (s, e)))
             for i in chosen:
