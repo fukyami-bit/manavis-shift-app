@@ -122,7 +122,7 @@ if st.session_state.step == "result" and "result" in st.session_state:
     if result.shortages:
         with st.expander(f"不足・要確認 {len(result.shortages)}件", expanded=True):
             for s in result.shortages:
-                st.warning(f"{s['date'].strftime('%m/%d')}: {s['band']} が {s['available']}/{s['required']}名")
+                st.warning(f"{s['date'].strftime('%m/%d')}: {s['message']}")
     if result.warnings:
         for w in result.warnings:
             st.warning(w)

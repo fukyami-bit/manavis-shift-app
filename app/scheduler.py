@@ -2,17 +2,21 @@
 
 方針:
 - 基本は「希望を出した人はできるだけ全員採用する」。
-- 各日・各時間帯の必要人数（下限）と、文理各1名以上/日をハード制約として扱う。
+- 各日・各時間帯の必要人数（下限）をハード制約として扱う。
+- 文系のみ／理系のみの出勤が2日連続しないようにする（1日だけなら許容）。
 - 予算を超える場合のみ、必要人数を満たす範囲で人員を間引く。間引く際は
   「確定日数/希望日数」の比率が高いスタッフから優先的に外し、公平性を保つ。
-- 希望者だけでは必要人数を満たせない日は「不足」としてそのまま報告する
-  （実在しない人員を作ることはできないため）。
+- 希望者だけでは必要人数を満たせない日・2日連続の偏りを解消できない日は
+  「不足」としてそのまま報告する（実在しない人員を作ることはできないため）。
 """
 from __future__ import annotations
 
+import datetime
 from collections import defaultdict
 
 from .models import Assignment, Band, DayInfo, RequestEntry, ScheduleResult, Staff
+
+ONE_DAY = datetime.timedelta(days=1)
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -97,11 +101,32 @@ def generate_schedule(
         return band_counts, categories
 
     days_by_date = {d.date: d for d in days}
+    day_index = {d.date: i for i, d in enumerate(days)}
 
-    # 不足チェック（希望者だけでは満たせない枠、文理どちらかが不在の日）
+    def is_adjacent(date_a, date_b) -> bool:
+        return abs((date_b - date_a).days) == 1
+
+    def would_create_same_category_streak(date_, resulting_categories) -> bool:
+        """指定日のカテゴリ構成が resulting_categories になったとき、
+        前後の日と2日連続の同一カテゴリのみになってしまわないかを確認する"""
+        if len(resulting_categories) != 1:
+            return False
+        only_cat = next(iter(resulting_categories))
+        idx = day_index[date_]
+        for neighbor_idx in (idx - 1, idx + 1):
+            if 0 <= neighbor_idx < len(days):
+                neighbor_day = days[neighbor_idx]
+                if not is_adjacent(date_, neighbor_day.date):
+                    continue
+                _counts, neighbor_categories = coverage(neighbor_day)
+                if neighbor_categories == {only_cat}:
+                    return True
+        return False
+
+    # 不足チェック（希望者だけでは満たせない枠）
     shortages = []
     for day in days:
-        band_counts, categories = coverage(day)
+        band_counts, _categories = coverage(day)
         for i, b in enumerate(day_bands(day)):
             if band_counts[i] < b.min_required:
                 shortages.append({
@@ -109,14 +134,7 @@ def generate_schedule(
                     "band": b.label,
                     "required": b.min_required,
                     "available": band_counts[i],
-                })
-        for cat in ("文", "理"):
-            if cat not in categories and any(s.category == cat for s in staff_list):
-                shortages.append({
-                    "date": day.date,
-                    "band": f"{cat}系スタッフ",
-                    "required": 1,
-                    "available": 0,
+                    "message": f"{b.label} が {band_counts[i]}/{b.min_required}名",
                 })
 
     def confirmed_count():
@@ -150,8 +168,8 @@ def generate_schedule(
                     if _overlaps(s, e, b.start, b.end) and band_counts[i] < b.min_required:
                         ok = False
                         break
-                if ok and staff.category not in categories:
-                    # このスタッフを外すと当該カテゴリが日内から消える
+                if ok and would_create_same_category_streak(d, categories):
+                    # このスタッフを外すと文系/理系のみの出勤が2日連続になってしまう
                     ok = False
                 if ok:
                     ratio = conf[sname] / requested_count[sname] if requested_count[sname] else 0
@@ -167,6 +185,26 @@ def generate_schedule(
             staff = staff_by_name.get(key_to_remove[0])
             cost -= max(0.0, e - s) * staff.hourly_wage
             del assigned[key_to_remove]
+
+    # 文系のみ／理系のみの出勤が2日連続していないかの最終チェック
+    # （希望者側にそもそも該当カテゴリがいない場合は間引きでは解消できないため報告のみ）
+    for day in days:
+        _counts, categories = coverage(day)
+        if len(categories) != 1:
+            continue
+        only_cat = next(iter(categories))
+        idx = day_index[day.date]
+        next_idx = idx + 1
+        if next_idx < len(days) and is_adjacent(day.date, days[next_idx].date):
+            _next_counts, next_categories = coverage(days[next_idx])
+            if next_categories == {only_cat}:
+                shortages.append({
+                    "date": day.date,
+                    "band": f"{only_cat}系のみ2日連続",
+                    "required": 1,
+                    "available": 0,
+                    "message": f"{day.date.strftime('%m/%d')}〜{days[next_idx].date.strftime('%m/%d')}が{only_cat}系スタッフのみになっています（希望者に他方の系統がいません）",
+                })
 
     # 出力用アサインメント一覧
     assignments = []
