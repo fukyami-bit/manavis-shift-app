@@ -3,6 +3,9 @@
 方針:
 - 基本は「希望を出した人はできるだけ全員採用する」。
 - 各日・各時間帯の必要人数（下限）をハード制約として扱う。
+- 1人の連続勤務は隣接する最大2コマ（午前+午後 or 午後+夜）まで。朝から
+  夜までの通し勤務にはしない。2コマのロングシフトは、その2コマがどちらも
+  不足している場合にのみ使う。
 - 文系のみ／理系のみの出勤が2日連続しないようにする（1日だけなら許容）。
 - 予算を超える場合のみ、必要人数を満たす範囲で人員を間引く。間引く際は
   「確定日数/希望日数」の比率が高いスタッフから優先的に外し、公平性を保つ。
@@ -65,25 +68,57 @@ def generate_schedule(
         if r.has_range():
             requested_count[r.staff] += 1
 
-    # 初期案: 有効な希望を出した人は全員採用
+    warnings = []
+
+    def day_bands(day: DayInfo):
+        return bands.get(day.day_type, [])
+
+    def choose_bands_for_full_span(day_bands_list, current_counts):
+        """朝〜夜まで丸ごと空いている希望を、最大2コマ（隣接する2つ）まで
+        に絞る。両方に不足がある隣接ペアがあればロングシフトとして両方を、
+        なければ最も不足しているコマ1つだけを選ぶ"""
+        deficits = [max(0, b.min_required - current_counts[i]) for i, b in enumerate(day_bands_list)]
+        for i in range(len(day_bands_list) - 1):
+            if deficits[i] > 0 and deficits[i + 1] > 0:
+                return (i, i + 1)
+        best_i = max(range(len(day_bands_list)), key=lambda i: (deficits[i], -i))
+        return (best_i,)
+
+    # 初期案: 有効な希望を出した人は全員採用。ただし1日の連続勤務は
+    # 隣接する最大2コマ（午前+午後 or 午後+夜）までとし、朝から夜までの
+    # 通し勤務にはしない。3コマにまたがる希望はコマ単位に絞り込む。
     candidates = {}  # date -> list[(RequestEntry, (start,end))]
     for day in days:
-        entries = []
+        b = day_bands(day)
+        direct = []
+        full_span = []
+        counts = [0] * len(b)
         for r in requests_by_day.get(day.date, []):
             rng = _expand_range(r, day)
-            if rng is not None:
-                entries.append((r, rng))
-        candidates[day.date] = entries
+            if rng is None:
+                continue
+            s, e = rng
+            overlapped = [i for i, band in enumerate(b) if _overlaps(s, e, band.start, band.end)]
+            if len(b) < 3 or len(overlapped) <= 2:
+                direct.append((r, (s, e)))
+                for i in overlapped:
+                    counts[i] += 1
+            else:
+                full_span.append(r)
+
+        for r in sorted(full_span, key=lambda r: r.staff):
+            chosen = choose_bands_for_full_span(b, counts)
+            s, e = b[chosen[0]].start, b[chosen[-1]].end
+            direct.append((r, (s, e)))
+            for i in chosen:
+                counts[i] += 1
+
+        candidates[day.date] = direct
 
     assigned = {}  # (staff, date) -> (RequestEntry, (start,end))
     for day in days:
         for r, rng in candidates[day.date]:
             assigned[(r.staff, day.date)] = (r, rng)
-
-    warnings = []
-
-    def day_bands(day: DayInfo):
-        return bands.get(day.day_type, [])
 
     def coverage(day: DayInfo, exclude_key=None):
         """その日の各バンドの現在の充足人数と、文理の在籍状況を返す"""
