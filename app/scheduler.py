@@ -26,6 +26,7 @@ from collections import defaultdict
 from .models import Assignment, Band, DayInfo, RequestEntry, ScheduleResult, Staff
 
 ONE_DAY = datetime.timedelta(days=1)
+MIN_SHIFT_HOURS = 2.5  # これより短い勤務は割り当てない
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -173,6 +174,8 @@ def generate_schedule(
             elif len(overlapped) == 1:
                 i = overlapped[0]
                 new_s, new_e = max(s, b[i].start), min(e, b[i].end)
+                if new_e - new_s < MIN_SHIFT_HOURS:
+                    continue
                 direct.append((r, (new_s, new_e)))
                 counts[i] += 1
             else:
@@ -183,6 +186,8 @@ def generate_schedule(
             # コマの境界時刻ではなく、実際の希望時間とコマ範囲の重なりに絞る
             new_s = max(s, b[chosen[0]].start)
             new_e = min(e, b[chosen[-1]].end)
+            if new_e - new_s < MIN_SHIFT_HOURS:
+                continue
             direct.append((r, (new_s, new_e)))
             for i in chosen:
                 counts[i] += 1
@@ -305,7 +310,8 @@ def generate_schedule(
     shortages = []
     for day in days:
         band_counts, _categories = coverage(day)
-        for i, b in enumerate(day_bands(day)):
+        db = day_bands(day)
+        for i, b in enumerate(db):
             if band_counts[i] < b.min_required:
                 shortages.append({
                     "date": day.date,
@@ -313,6 +319,22 @@ def generate_schedule(
                     "required": b.min_required,
                     "available": band_counts[i],
                     "message": f"{b.label} が {band_counts[i]}/{b.min_required}名",
+                })
+        # 開館直後（その日の最初のコマの開始時刻）に誰も出勤していない場合は
+        # 単純な人数カウントでは拾えないため、別途チェックする
+        if db:
+            opening_band = db[0]
+            anyone_at_open = any(
+                d == day.date and s <= opening_band.start
+                for (_sname, d), (_r, (s, _e)) in assigned.items()
+            )
+            if not anyone_at_open:
+                shortages.append({
+                    "date": day.date,
+                    "band": "開館時",
+                    "required": 1,
+                    "available": 0,
+                    "message": f"開館時刻（{opening_band.start:g}時）に出勤している人がいません",
                 })
 
     def total_cost():
