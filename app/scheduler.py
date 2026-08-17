@@ -27,6 +27,7 @@ from .models import Assignment, Band, DayInfo, RequestEntry, ScheduleResult, Sta
 
 ONE_DAY = datetime.timedelta(days=1)
 MIN_SHIFT_HOURS = 2.5  # これより短い勤務は割り当てない
+MIN_GUARANTEED_DAYS = 4  # この日数以上希望した人は、可能な限りこの日数を確保する
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -143,13 +144,21 @@ def generate_schedule(
     def choose_bands(overlapped, day_bands_list, current_counts):
         """複数コマにまたがる希望を、実際に必要な分だけに絞り込む。
         隣接する2コマの両方が不足していればロングシフトとしてその2つを、
-        そうでなければ最も不足している1コマだけを選ぶ（不足がなければ
-        時間の遅いコマを優先し、無駄に早い時間から入れない）"""
+        そうでなければ最も不足している1コマだけを選ぶ。不足が無ければ、
+        特定のコマに人が集中しないよう上限に余裕があるコマを優先し、
+        それでも並んだ場合は時間の遅いコマを優先する"""
         deficits = {i: max(0, day_bands_list[i].min_required - current_counts[i]) for i in overlapped}
         for i in overlapped:
             if (i + 1) in deficits and deficits[i] > 0 and deficits[i + 1] > 0:
                 return (i, i + 1)
-        best_i = max(overlapped, key=lambda i: (deficits[i], i))
+
+        def room(i):
+            band = day_bands_list[i]
+            if band.max_required is None:
+                return 999
+            return band.max_required - current_counts[i]
+
+        best_i = max(overlapped, key=lambda i: (deficits[i], room(i), i))
         return (best_i,)
 
     # 初期案: 有効な希望を出した人は全員採用。ただし1人の連続勤務は
@@ -162,6 +171,17 @@ def generate_schedule(
         direct = []
         multi = []
         counts = [0] * len(b)
+
+        def _too_short(new_s, new_e, band_lo, band_hi):
+            """短すぎる勤務かどうかを判定する。ただし、コマ自体がその日の
+            開館時間の都合で短い場合（例: 早く閉まる日曜の夜コマ）は、
+            希望者がそのコマを丸ごとカバーしているなら除外しない。"""
+            duration = new_e - new_s
+            if duration >= MIN_SHIFT_HOURS:
+                return False
+            full_len = min(band_hi, day.open_end) - max(band_lo, day.open_start)
+            return duration < full_len - 1e-9
+
         for r in requests_by_day.get(day.date, []):
             rng = _expand_range(r, day)
             if rng is None:
@@ -174,7 +194,7 @@ def generate_schedule(
             elif len(overlapped) == 1:
                 i = overlapped[0]
                 new_s, new_e = max(s, b[i].start), min(e, b[i].end)
-                if new_e - new_s < MIN_SHIFT_HOURS:
+                if _too_short(new_s, new_e, b[i].start, b[i].end):
                     continue
                 direct.append((r, (new_s, new_e)))
                 counts[i] += 1
@@ -194,7 +214,7 @@ def generate_schedule(
             # コマの境界時刻ではなく、実際の希望時間とコマ範囲の重なりに絞る
             new_s = max(s, b[chosen[0]].start)
             new_e = min(e, b[chosen[-1]].end)
-            if new_e - new_s < MIN_SHIFT_HOURS:
+            if _too_short(new_s, new_e, b[chosen[0]].start, b[chosen[-1]].end):
                 continue
             direct.append((r, (new_s, new_e)))
             for i in chosen:
@@ -269,6 +289,17 @@ def generate_schedule(
             c[sname] += 1
         return c
 
+    def removal_priority(sname, conf):
+        """間引き候補の優先順位を返す（大きいほど先に外してよい）。
+        希望日数が少ない人（MIN_GUARANTEED_DAYS以下しか希望していない人を
+        除く）が最低保証日数を下回るような削除は、他に選択肢がない限り
+        後回しにする。"""
+        req = requested_count[sname]
+        c = conf[sname]
+        under_floor = req >= MIN_GUARANTEED_DAYS and c <= MIN_GUARANTEED_DAYS
+        ratio = c / req if req else 0
+        return (0 if under_floor else 1, ratio)
+
     # 連勤上限（原則3連勤まで）。人手が足りず外せない場合のみ超過を許容する。
     MAX_CONSECUTIVE_DAYS = 3
     streak_len = defaultdict(int)
@@ -307,11 +338,10 @@ def generate_schedule(
                     if d != day.date or not _overlaps(s, e, band.start, band.end):
                         continue
                     if is_safe_to_remove(sname, d, s, e):
-                        ratio = conf[sname] / requested_count[sname] if requested_count[sname] else 0
-                        removable.append(((sname, d), ratio))
+                        removable.append(((sname, d), removal_priority(sname, conf)))
                 if not removable:
                     break
-                removable.sort(key=lambda x: -x[1])
+                removable.sort(key=lambda x: x[1], reverse=True)
                 del assigned[removable[0][0]]
 
     # 不足チェック（希望者だけでは満たせない枠）
@@ -329,8 +359,9 @@ def generate_schedule(
                     "message": f"{b.label} が {band_counts[i]}/{b.min_required}名",
                 })
         # 開館直後（その日の最初のコマの開始時刻）に誰も出勤していない場合は
-        # 単純な人数カウントでは拾えないため、別途チェックする
-        if db:
+        # 単純な人数カウントでは拾えないため、別途チェックする。土日はAAが
+        # 開館対応をするため必須。平日は17時ちょうどでなくてもよい。
+        if db and day.day_type == "weekend":
             opening_band = db[0]
             anyone_at_open = any(
                 d == day.date and s <= opening_band.start
@@ -364,14 +395,13 @@ def generate_schedule(
                 if not staff:
                     continue
                 if is_safe_to_remove(sname, d, s, e):
-                    ratio = conf[sname] / requested_count[sname] if requested_count[sname] else 0
-                    removable.append(((sname, d), ratio, staff.hourly_wage))
+                    removable.append(((sname, d), removal_priority(sname, conf), staff.hourly_wage))
 
             if not removable:
                 warnings.append(f"予算超過: 必要人数を維持したままではこれ以上削減できません（残り超過額 約{int(cost - budget):,}円）")
                 break
 
-            removable.sort(key=lambda x: (-x[1], -x[2]))
+            removable.sort(key=lambda x: (x[1], x[2]), reverse=True)
             key_to_remove = removable[0][0]
             _r, (s, e) = assigned[key_to_remove]
             staff = staff_by_name.get(key_to_remove[0])
