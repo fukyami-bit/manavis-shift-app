@@ -158,12 +158,14 @@ def generate_schedule(
                 for i in overlapped:
                     counts[i] += 1
             else:
-                multi.append((r, overlapped))
+                multi.append((r, overlapped, s, e))
 
-        for r, overlapped in sorted(multi, key=lambda x: x[0].staff):
+        for r, overlapped, s, e in sorted(multi, key=lambda x: x[0].staff):
             chosen = choose_bands(overlapped, b, counts)
-            s, e = b[chosen[0]].start, b[chosen[-1]].end
-            direct.append((r, (s, e)))
+            # コマの境界時刻ではなく、実際の希望時間とコマ範囲の重なりに絞る
+            new_s = max(s, b[chosen[0]].start)
+            new_e = min(e, b[chosen[-1]].end)
+            direct.append((r, (new_s, new_e)))
             for i in chosen:
                 counts[i] += 1
 
