@@ -118,12 +118,19 @@ if st.session_state.step in ("configure", "result") and "parsed" in st.session_s
                 st.markdown(f"**{label}**")
                 new_list = []
                 for b in bands[day_type]:
-                    n = st.number_input(
-                        f"{label} {b.label} の必要人数",
+                    c1, c2 = st.columns(2)
+                    n_min = c1.number_input(
+                        f"{b.label} 最低人数",
                         min_value=0, max_value=10, value=b.min_required, step=1,
-                        key=f"band_{day_type}_{b.label}",
+                        key=f"band_min_{day_type}_{b.label}",
                     )
-                    new_list.append(replace(b, min_required=n))
+                    default_max = b.max_required if b.max_required is not None else n_min
+                    n_max = c2.number_input(
+                        f"{b.label} 上限人数",
+                        min_value=n_min, max_value=15, value=max(default_max, n_min), step=1,
+                        key=f"band_max_{day_type}_{b.label}",
+                    )
+                    new_list.append(replace(b, min_required=n_min, max_required=n_max))
                 new_bands[day_type] = new_list
             st.session_state.bands = new_bands
 

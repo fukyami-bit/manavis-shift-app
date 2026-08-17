@@ -48,6 +48,7 @@ class Band:
     end: float
     min_required: int
     label: str = ""
+    max_required: Optional[int] = None
 
 
 @dataclass

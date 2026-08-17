@@ -2,13 +2,19 @@
 
 方針:
 - 基本は「希望を出した人はできるだけ全員採用する」。
-- 各日・各時間帯の必要人数（下限）をハード制約として扱う。
+- 希望は、その日の実際の開館時間の範囲内に丸める（開館時間を超えた記載
+  ミスも自動補正される）。平日はアルバイトスタッフが17時以降のみ勤務する
+  前提とし、14〜17時のコマは設けない。
+- 各日・各時間帯の必要人数（下限）をハード制約として扱う。上限人数も
+  設定でき、余裕があっても1つの時間帯に人が集中しすぎないようにする。
 - 1人の連続勤務は隣接する最大2コマ（午前+午後 or 午後+夜）まで。朝から
   夜までの通し勤務にはしない。2コマのロングシフトは、その2コマがどちらも
   不足している場合にのみ使う。
-- 文系のみ／理系のみの出勤が2日連続しないようにする（1日だけなら許容）。
-- 予算を超える場合のみ、必要人数を満たす範囲で人員を間引く。間引く際は
-  「確定日数/希望日数」の比率が高いスタッフから優先的に外し、公平性を保つ。
+- 1人の連勤は原則3連勤まで。人手が足りず外せない場合のみ超過を許容する。
+- 文系のみ／理系のみの出勤は、いる場合はその日のうちに両方1名以上配置する
+  ことを優先する。どうしても無理な場合は仕方ないが、2日連続にはしない。
+- 予算・上限人数を超える場合は間引く。間引く際は「確定日数/希望日数」の
+  比率が高いスタッフから優先的に外し、公平性を保つ。
 - 希望者だけでは必要人数を満たせない日・2日連続の偏りを解消できない日は
   「不足」としてそのまま報告する（実在しない人員を作ることはできないため）。
 """
@@ -27,26 +33,34 @@ def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> boo
 
 
 def default_bands() -> dict:
+    # 平日はアルバイトスタッフが17時以降のみ勤務する前提のため、開館時刻
+    # (14時)から17時までのコマは設けない。
     return {
         "weekend": [
-            Band(9, 13, 1, "9:00-13:00"),
-            Band(13, 18, 2, "13:00-18:00"),
-            Band(18, 21.75, 2, "18:00-21:45"),
+            Band(9, 13, 1, "9:00-13:00", max_required=2),
+            Band(13, 18, 2, "13:00-18:00", max_required=3),
+            Band(18, 21.75, 2, "18:00-21:45", max_required=3),
         ],
         "weekday": [
-            Band(14, 17, 1, "14:00-17:00"),
-            Band(17, 21.75, 2, "17:00-21:45"),
+            Band(17, 21.75, 2, "17:00-21:45", max_required=3),
         ],
     }
 
 
 def _expand_range(entry: RequestEntry, day: DayInfo):
+    """希望をその日の実際の開館時間の範囲内に丸めて返す。開館時間より
+    後ろの時刻を書き間違えている場合（例: 通常20時閉館の日曜に21:45まで
+    申請している等）も、ここで自動的に補正される。"""
+    if day.open_start is None or day.open_end is None:
+        return None
     if entry.type == "full_day":
-        if day.open_start is None or day.open_end is None:
-            return None
         return day.open_start, day.open_end
     if entry.type == "range" and entry.start is not None and entry.end is not None:
-        return entry.start, entry.end
+        s = max(entry.start, day.open_start)
+        e = min(entry.end, day.open_end)
+        if s >= e:
+            return None
+        return s, e
     return None
 
 
@@ -153,10 +167,14 @@ def generate_schedule(
                 continue
             s, e = rng
             overlapped = [i for i, band in enumerate(b) if _overlaps(s, e, band.start, band.end)]
-            if len(overlapped) <= 1:
-                direct.append((r, (s, e)))
-                for i in overlapped:
-                    counts[i] += 1
+            if not overlapped:
+                # どのコマにも重ならない希望（例: 平日14-17時のみの希望）は対象外
+                continue
+            elif len(overlapped) == 1:
+                i = overlapped[0]
+                new_s, new_e = max(s, b[i].start), min(e, b[i].end)
+                direct.append((r, (new_s, new_e)))
+                counts[i] += 1
             else:
                 multi.append((r, overlapped, s, e))
 
@@ -214,6 +232,75 @@ def generate_schedule(
                     return True
         return False
 
+    def is_safe_to_remove(sname, d, s, e) -> bool:
+        """このスタッフのこの日の割当を外しても、時間帯の必要人数・文理の
+        在籍・文理2日連続ルールのいずれも壊さないかを判定する"""
+        day = days_by_date[d]
+        band_counts, categories = coverage(day, exclude_key=(sname, d))
+        staff = staff_by_name.get(sname)
+        if not staff:
+            return True
+        for i, b in enumerate(day_bands(day)):
+            if _overlaps(s, e, b.start, b.end) and band_counts[i] < b.min_required:
+                return False
+        if staff.category not in categories:
+            # このスタッフを外すと当該カテゴリがその日からいなくなる
+            return False
+        if would_create_same_category_streak(d, categories):
+            return False
+        return True
+
+    def confirmed_count():
+        c = defaultdict(int)
+        for (sname, _d) in assigned.keys():
+            c[sname] += 1
+        return c
+
+    # 連勤上限（原則3連勤まで）。人手が足りず外せない場合のみ超過を許容する。
+    MAX_CONSECUTIVE_DAYS = 3
+    streak_len = defaultdict(int)
+    prev_date = None
+    for day in days:
+        if prev_date is not None and (day.date - prev_date).days != 1:
+            streak_len.clear()
+        prev_date = day.date
+
+        working_today = [sname for (sname, d) in list(assigned.keys()) if d == day.date]
+        for sname in working_today:
+            if streak_len[sname] + 1 > MAX_CONSECUTIVE_DAYS:
+                r, (s, e) = assigned[(sname, day.date)]
+                if is_safe_to_remove(sname, day.date, s, e):
+                    del assigned[(sname, day.date)]
+                    continue
+            streak_len[sname] += 1
+        for sname in staff_by_name:
+            if (sname, day.date) not in assigned:
+                streak_len[sname] = 0
+
+    # 時間帯ごとの上限人数（過剰配置の防止）。予算に余裕があっても、
+    # 必要以上の人数が1つの時間帯に集中しないようにする。
+    for day in days:
+        b = day_bands(day)
+        for i, band in enumerate(b):
+            if band.max_required is None:
+                continue
+            while True:
+                band_counts, _categories = coverage(day)
+                if band_counts[i] <= band.max_required:
+                    break
+                conf = confirmed_count()
+                removable = []
+                for (sname, d), (r, (s, e)) in assigned.items():
+                    if d != day.date or not _overlaps(s, e, band.start, band.end):
+                        continue
+                    if is_safe_to_remove(sname, d, s, e):
+                        ratio = conf[sname] / requested_count[sname] if requested_count[sname] else 0
+                        removable.append(((sname, d), ratio))
+                if not removable:
+                    break
+                removable.sort(key=lambda x: -x[1])
+                del assigned[removable[0][0]]
+
     # 不足チェック（希望者だけでは満たせない枠）
     shortages = []
     for day in days:
@@ -227,12 +314,6 @@ def generate_schedule(
                     "available": band_counts[i],
                     "message": f"{b.label} が {band_counts[i]}/{b.min_required}名",
                 })
-
-    def confirmed_count():
-        c = defaultdict(int)
-        for (sname, _d) in assigned.keys():
-            c[sname] += 1
-        return c
 
     def total_cost():
         total = 0.0
@@ -249,20 +330,10 @@ def generate_schedule(
             conf = confirmed_count()
             removable = []
             for (sname, d), (r, (s, e)) in assigned.items():
-                day = days_by_date[d]
-                band_counts, categories = coverage(day, exclude_key=(sname, d))
                 staff = staff_by_name.get(sname)
                 if not staff:
                     continue
-                ok = True
-                for i, b in enumerate(day_bands(day)):
-                    if _overlaps(s, e, b.start, b.end) and band_counts[i] < b.min_required:
-                        ok = False
-                        break
-                if ok and would_create_same_category_streak(d, categories):
-                    # このスタッフを外すと文系/理系のみの出勤が2日連続になってしまう
-                    ok = False
-                if ok:
+                if is_safe_to_remove(sname, d, s, e):
                     ratio = conf[sname] / requested_count[sname] if requested_count[sname] else 0
                     removable.append(((sname, d), ratio, staff.hourly_wage))
 
