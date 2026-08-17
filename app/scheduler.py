@@ -50,6 +50,58 @@ def _expand_range(entry: RequestEntry, day: DayInfo):
     return None
 
 
+def compute_cost_from_shift(
+    staff_list: list[Staff],
+    days: list[DayInfo],
+    requests: list[RequestEntry],
+) -> ScheduleResult:
+    """すでに確定・手直し済みのシフト表を読み取り、シフトの組み直しはせず
+    そのまま人件費だけを集計する（修正後の人件費確認用）。"""
+    staff_by_name = {s.name: s for s in staff_list}
+    days_by_date = {d.date: d for d in days}
+
+    assignments = []
+    for r in requests:
+        if not r.has_range():
+            continue
+        day = days_by_date.get(r.date)
+        if day is None:
+            continue
+        rng = _expand_range(r, day)
+        if rng is None:
+            continue
+        s, e = rng
+        staff = staff_by_name.get(r.staff)
+        if staff is None:
+            continue
+        assignments.append(Assignment(staff=r.staff, date=r.date, start=s, end=e, tentative=r.tentative, wage=staff.hourly_wage))
+    assignments.sort(key=lambda a: (a.date, a.start, a.staff))
+
+    staff_stats = {}
+    total_cost = 0.0
+    for staff in staff_list:
+        staff_assignments = [a for a in assignments if a.staff == staff.name]
+        hours = sum(a.hours for a in staff_assignments)
+        cost = hours * staff.hourly_wage
+        total_cost += cost
+        staff_stats[staff.name] = {
+            "confirmed": len(staff_assignments),
+            "requested": len(staff_assignments),
+            "ratio": 1.0 if staff_assignments else None,
+            "hours": hours,
+            "cost": cost,
+        }
+
+    return ScheduleResult(
+        assignments=assignments,
+        shortages=[],
+        warnings=[],
+        total_cost=total_cost,
+        budget=0,
+        staff_stats=staff_stats,
+    )
+
+
 def generate_schedule(
     staff_list: list[Staff],
     days: list[DayInfo],

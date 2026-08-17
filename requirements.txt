@@ -1,3 +1,4 @@
 streamlit>=1.30
 openpyxl>=3.1
 pandas>=2.0
+watchdog>=3.0
