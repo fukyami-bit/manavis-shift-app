@@ -181,7 +181,15 @@ def generate_schedule(
             else:
                 multi.append((r, overlapped, s, e))
 
-        for r, overlapped, s, e in sorted(multi, key=lambda x: x[0].staff):
+        # 開館直後（最初のコマの開始時刻）から実際に入れる人を優先的に処理する。
+        # そうしないと、後から来る人の希望が先に「開館コマ充足」とカウントされて
+        # しまい、本当は開館から入れる人が後回しにされてしまう。
+        def _multi_sort_key(item):
+            _r, _overlapped, item_s, _e = item
+            can_open = bool(b) and item_s <= b[0].start
+            return (0 if can_open else 1, item[0].staff)
+
+        for r, overlapped, s, e in sorted(multi, key=_multi_sort_key):
             chosen = choose_bands(overlapped, b, counts)
             # コマの境界時刻ではなく、実際の希望時間とコマ範囲の重なりに絞る
             new_s = max(s, b[chosen[0]].start)
