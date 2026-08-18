@@ -114,7 +114,11 @@ if st.session_state.step in ("configure", "result") and "parsed" in st.session_s
             st.subheader("必要人数（時間帯ごと）")
             bands = st.session_state.bands
             new_bands = {}
-            for day_type, label in (("weekend", "土日"), ("weekday", "平日")):
+            for day_type, label in (
+                ("weekend", "土日（長期休暇中の日曜含む）"),
+                ("sunday_short", "日曜（20時閉館）"),
+                ("weekday", "平日"),
+            ):
                 st.markdown(f"**{label}**")
                 new_list = []
                 for b in bands[day_type]:

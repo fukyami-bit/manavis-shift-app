@@ -36,12 +36,18 @@ def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> boo
 
 def default_bands() -> dict:
     # 平日はアルバイトスタッフが17時以降のみ勤務する前提のため、開館時刻
-    # (14時)から17時までのコマは設けない。
+    # (14時)から17時までのコマは設けない。長期休暇でない日曜（20時閉館）は
+    # 土日通常のコマ割りとは別に、専用のコマ区分を使う。
     return {
         "weekend": [
             Band(9, 13, 1, "9:00-13:00", max_required=2),
             Band(13, 18, 2, "13:00-18:00", max_required=3),
             Band(18, 21.75, 2, "18:00-21:45", max_required=3),
+        ],
+        "sunday_short": [
+            Band(9, 12, 1, "9:00-12:00", max_required=2),
+            Band(12, 16, 2, "12:00-16:00", max_required=3),
+            Band(16, 20, 2, "16:00-20:00", max_required=3),
         ],
         "weekday": [
             Band(17, 21.75, 2, "17:00-21:45", max_required=3),
@@ -361,7 +367,7 @@ def generate_schedule(
         # 開館直後（その日の最初のコマの開始時刻）に誰も出勤していない場合は
         # 単純な人数カウントでは拾えないため、別途チェックする。土日はAAが
         # 開館対応をするため必須。平日は17時ちょうどでなくてもよい。
-        if db and day.day_type == "weekend":
+        if db and day.day_type in ("weekend", "sunday_short"):
             opening_band = db[0]
             anyone_at_open = any(
                 d == day.date and s <= opening_band.start

@@ -24,7 +24,12 @@ class DayInfo:
     def day_type(self) -> str:
         if self.open_start is None:
             return "weekday"
-        return "weekend" if self.open_start <= 10 else "weekday"
+        if self.open_start > 10:
+            return "weekday"
+        # 長期休暇でない日曜（20時閉館）は土日と異なるコマ区分を使う
+        if self.weekday == "日" and self.open_end is not None and self.open_end <= 20.5:
+            return "sunday_short"
+        return "weekend"
 
 
 @dataclass
