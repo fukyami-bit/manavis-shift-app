@@ -171,7 +171,10 @@ def generate_schedule(
     # 実際に必要な分（原則1コマ、隣接する2コマがどちらも不足している
     # 場合のみ2コマ分のロングシフト）に絞り込み、必要のない早い時間から
     # の勤務や朝から夜までの通し勤務にはしない。
-    candidates = {}  # date -> list[(RequestEntry, (start,end))]
+    # 複数コマにまたがる希望が競合したときは、既にその月で確定した日数が
+    # 少ない人を優先することで、開館担当などが特定の人に偏らないようにする。
+    assigned = {}  # (staff, date) -> (RequestEntry, (start,end))
+    days_assigned_so_far = defaultdict(int)
     for day in days:
         b = day_bands(day)
         direct = []
@@ -213,7 +216,7 @@ def generate_schedule(
         def _multi_sort_key(item):
             _r, _overlapped, item_s, _e = item
             can_open = bool(b) and item_s <= b[0].start
-            return (0 if can_open else 1, item[0].staff)
+            return (0 if can_open else 1, days_assigned_so_far[item[0].staff], item[0].staff)
 
         for r, overlapped, s, e in sorted(multi, key=_multi_sort_key):
             chosen = choose_bands(overlapped, b, counts)
@@ -226,12 +229,9 @@ def generate_schedule(
             for i in chosen:
                 counts[i] += 1
 
-        candidates[day.date] = direct
-
-    assigned = {}  # (staff, date) -> (RequestEntry, (start,end))
-    for day in days:
-        for r, rng in candidates[day.date]:
+        for r, rng in direct:
             assigned[(r.staff, day.date)] = (r, rng)
+            days_assigned_so_far[r.staff] += 1
 
     def coverage(day: DayInfo, exclude_key=None):
         """その日の各バンドの現在の充足人数と、文理の在籍状況を返す"""
