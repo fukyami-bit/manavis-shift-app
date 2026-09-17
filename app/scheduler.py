@@ -233,6 +233,10 @@ def generate_schedule(
             assigned[(r.staff, day.date)] = (r, rng)
             days_assigned_so_far[r.staff] += 1
 
+    # 間引き前の候補一覧を保持しておく（週1回以上のペース確保のため、
+    # 一度外れた候補を後で復活させることがある）
+    all_candidates = dict(assigned)
+
     def coverage(day: DayInfo, exclude_key=None):
         """その日の各バンドの現在の充足人数と、文理の在籍状況を返す"""
         band_counts = [0] * len(day_bands(day))
@@ -350,6 +354,29 @@ def generate_schedule(
                 removable.sort(key=lambda x: x[1], reverse=True)
                 del assigned[removable[0][0]]
 
+    # 平日に3人体制になった場合、人件費を抑えるため最も早く入る人の勤務
+    # 時間を短縮する（早く来た人が早めに帰る形にし、全員が閉館までフルで
+    # 入ることを避ける）。2人体制のときは変更しない。
+    STAGGER_HOURS = 3.0
+    for day in days:
+        if day.day_type != "weekday":
+            continue
+        b = day_bands(day)
+        if not b:
+            continue
+        band = b[0]
+        members = [
+            (sname, s, e) for (sname, d), (_r, (s, e)) in assigned.items()
+            if d == day.date and _overlaps(s, e, band.start, band.end)
+        ]
+        if len(members) < 3:
+            continue
+        earliest_sname, s, e = min(members, key=lambda x: x[1])
+        new_e = min(e, s + STAGGER_HOURS)
+        if new_e < e:
+            r, _ = assigned[(earliest_sname, day.date)]
+            assigned[(earliest_sname, day.date)] = (r, (s, new_e))
+
     # 不足チェック（希望者だけでは満たせない枠）
     shortages = []
     for day in days:
@@ -413,6 +440,60 @@ def generate_schedule(
             staff = staff_by_name.get(key_to_remove[0])
             cost -= max(0.0, e - s) * staff.hourly_wage
             del assigned[key_to_remove]
+
+    # 週1回以上のペースを保つ: 確定した勤務日の間隔が7日を超える場合、
+    # 間引きで外れた候補の中から1つだけ復活させて空きすぎを防ぐ
+    # （上限人数・連勤上限は守った上で行う）
+    def is_safe_to_add(sname, d, s, e) -> bool:
+        day = days_by_date[d]
+        band_counts, _categories = coverage(day)
+        for i, b in enumerate(day_bands(day)):
+            if _overlaps(s, e, b.start, b.end) and b.max_required is not None and band_counts[i] >= b.max_required:
+                return False
+        idx = day_index[d]
+        run = 1
+        j = idx - 1
+        while j >= 0 and is_adjacent(days[j].date, days[j + 1].date) and (sname, days[j].date) in assigned:
+            run += 1
+            j -= 1
+        j = idx + 1
+        while j < len(days) and is_adjacent(days[j - 1].date, days[j].date) and (sname, days[j].date) in assigned:
+            run += 1
+            j += 1
+        return run <= MAX_CONSECUTIVE_DAYS
+
+    candidate_dates_by_staff = defaultdict(list)
+    for (sname, d) in all_candidates:
+        candidate_dates_by_staff[sname].append(d)
+
+    for sname, all_dates in candidate_dates_by_staff.items():
+        all_dates = sorted(all_dates)
+        while True:
+            confirmed_dates = sorted(d for d in all_dates if (sname, d) in assigned)
+            if len(confirmed_dates) < 2:
+                break
+            added_any = False
+            for i in range(len(confirmed_dates) - 1):
+                gap_days = (confirmed_dates[i + 1] - confirmed_dates[i]).days
+                if gap_days <= 7:
+                    continue
+                gap_candidates = [
+                    d for d in all_dates
+                    if confirmed_dates[i] < d < confirmed_dates[i + 1] and (sname, d) not in assigned
+                ]
+                # 空白期間を最もよく2分割できる候補を優先する
+                mid_offset = gap_days / 2
+                gap_candidates.sort(key=lambda d: abs((d - confirmed_dates[i]).days - mid_offset))
+                for d in gap_candidates:
+                    r, (s, e) = all_candidates[(sname, d)]
+                    if is_safe_to_add(sname, d, s, e):
+                        assigned[(sname, d)] = (r, (s, e))
+                        added_any = True
+                        break
+                if added_any:
+                    break  # confirmed_datesが古くなったので最初からやり直す
+            if not added_any:
+                break
 
     # 文系のみ／理系のみの出勤が2日連続していないかの最終チェック
     # （希望者側にそもそも該当カテゴリがいない場合は間引きでは解消できないため報告のみ）
