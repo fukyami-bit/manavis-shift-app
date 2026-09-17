@@ -339,12 +339,13 @@ def generate_schedule(
             week_count = sum(1 for (n2, d2) in assigned if n2 == sname and _week_key(d2) == wk)
             leader_under_target = week_count <= LEADER_WEEKLY_TARGET or c <= LEADER_MONTHLY_TARGET
         protected = under_floor or leader_under_target
-        # リーダー優先の同着判定は、どちらの保護対象でもない人同士の間でしか
-        # 使わない。最低保証日数で守られている人を、リーダー優先を理由に
-        # 先に外してしまわないようにするため。
-        non_leader_tiebreak = 0 if protected else (1 if not leader else 0)
         ratio = c / req if req else 0
-        return (0 if protected else 1, non_leader_tiebreak, ratio)
+        # 充足率（ratio）を優先順位の主軸にする。リーダーかどうかは、
+        # 充足率が同点のときにだけ働く最後のタイブレークにとどめる
+        # （そうしないと、非リーダーは充足率に関係なく全員が先に
+        # 削られる対象になってしまう）。
+        non_leader_tiebreak = 0 if protected else (1 if not leader else 0)
+        return (0 if protected else 1, ratio, non_leader_tiebreak)
 
     # 連勤上限（原則3連勤まで）。人手が足りず外せない場合のみ超過を許容する。
     MAX_CONSECUTIVE_DAYS = 3
