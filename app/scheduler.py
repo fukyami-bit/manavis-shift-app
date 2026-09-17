@@ -35,6 +35,8 @@ MIN_GUARANTEED_DAYS = 4  # この日数までの希望は、できる限りす�
 RATIO_TARGET_SLOPE = 0.4  # MIN_GUARANTEED_DAYSを超えた希望日数のうち、目標日数に上乗せする割合
 LEADER_WAGE_THRESHOLD = 1500  # この時給以上のスタッフは「リーダー」として優先配置する
 LEADER_MONTHLY_TARGET = 10  # リーダーに目指してほしい月あたりの勤務日数（これに届いたら以降は充足率を優先）
+SMALL_REQUEST_THRESHOLD = 11  # この日数以下の希望者は、下の充足率を確実に達成させる
+SMALL_REQUEST_RATIO_GUARANTEE = 0.6  # SMALL_REQUEST_THRESHOLD以下の希望者に確実に保証する充足率
 
 
 def _is_leader(staff: Staff | None) -> bool:
@@ -626,6 +628,38 @@ def generate_schedule(
                 new_s = max(min(s, raw_s), b[merged[0]].start)
                 new_e = min(max(e, raw_e), b[merged[-1]].end)
                 assigned[(sname, d2)] = (r, (new_s, new_e))
+                break
+
+    # 希望日数がSMALL_REQUEST_THRESHOLD以下の人には、
+    # SMALL_REQUEST_RATIO_GUARANTEE(60%)を確実に達成させる。同じくらい
+    # 困っている人同士では譲り合いが起きないことがあるため、この保証枠に
+    # 限っては希望日数が多い人（非リーダー）から優先的に譲ってもらう。
+    def _bumpable_for_small_guarantee(n2):
+        if _is_leader(staff_by_name.get(n2)):
+            return False
+        return requested_count[n2] > SMALL_REQUEST_THRESHOLD
+
+    for staff in staff_list:
+        sname = staff.name
+        req = requested_count[sname]
+        if req == 0 or req > SMALL_REQUEST_THRESHOLD:
+            continue
+        target = math.ceil(req * SMALL_REQUEST_RATIO_GUARANTEE)
+        cand_dates = sorted(d for (n2, d) in all_candidates if n2 == sname)
+        while True:
+            confirmed_now = sum(1 for d in cand_dates if (sname, d) in assigned)
+            if confirmed_now >= target:
+                break
+            remaining = [d for d in cand_dates if (sname, d) not in assigned]
+            if not remaining:
+                break
+            added = False
+            for d in remaining:
+                r, (s, e) = all_candidates[(sname, d)]
+                if try_add_with_bump(sname, d, s, e, _bumpable_for_small_guarantee):
+                    added = True
+                    break
+            if not added:
                 break
 
     # 希望日数が少ない人ほど充足率が高くなるようにする（_target_days）。
