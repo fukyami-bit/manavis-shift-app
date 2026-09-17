@@ -495,6 +495,58 @@ def generate_schedule(
             j += 1
         return run <= MAX_CONSECUTIVE_DAYS
 
+    def try_add_with_bump(sname, d, s, e, is_bumpable) -> bool:
+        """このスタッフをこの日に追加できるか試す。上限人数だけが理由で
+        入れない場合、is_bumpable(他のスタッフ名)がTrueを返す人が同じ
+        コマにいれば、その人を1人外して代わりに入れる（充足率が高い人を
+        優先して譲ってもらう）。それでも入れられなければ元に戻す。"""
+        if is_safe_to_add(sname, d, s, e):
+            r0 = all_candidates[(sname, d)][0]
+            assigned[(sname, d)] = (r0, (s, e))
+            return True
+
+        day = days_by_date[d]
+        band_counts, _categories = coverage(day)
+        db = day_bands(day)
+        blocked_bands = [
+            i for i, b in enumerate(db)
+            if _overlaps(s, e, b.start, b.end) and b.max_required is not None and band_counts[i] >= b.max_required
+        ]
+        if not blocked_bands:
+            return False  # 上限人数以外の理由（連勤上限など）ではやり取りしない
+
+        bumped = []
+        for i in blocked_bands:
+            b = db[i]
+            candidates_to_bump = []
+            for (n2, d2), (_r2, (s2, e2)) in assigned.items():
+                if d2 != d or n2 == sname or not _overlaps(s2, e2, b.start, b.end):
+                    continue
+                if not is_bumpable(n2):
+                    continue
+                if not is_safe_to_remove(n2, d2, s2, e2):
+                    continue
+                req2 = requested_count[n2]
+                conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
+                ratio2 = conf2 / req2 if req2 else 0
+                candidates_to_bump.append((n2, ratio2))
+            if not candidates_to_bump:
+                for bn, bd in bumped:
+                    assigned[(bn, bd)] = all_candidates[(bn, bd)]
+                return False
+            candidates_to_bump.sort(key=lambda x: -x[1])
+            bump_name = candidates_to_bump[0][0]
+            bumped.append((bump_name, d))
+            del assigned[(bump_name, d)]
+
+        if is_safe_to_add(sname, d, s, e):
+            r0 = all_candidates[(sname, d)][0]
+            assigned[(sname, d)] = (r0, (s, e))
+            return True
+        for bn, bd in bumped:
+            assigned[(bn, bd)] = all_candidates[(bn, bd)]
+        return False
+
     candidate_dates_by_staff = defaultdict(list)
     for (sname, d) in all_candidates:
         candidate_dates_by_staff[sname].append(d)
@@ -503,6 +555,9 @@ def generate_schedule(
     # 間引きの結果に関わらず、月あたりの勤務日数がLEADER_MONTHLY_TARGETに
     # 届いていなければ、外れていた候補から優先的に復活させる。10回に
     # 届いたらそれ以上は特別扱いしない。
+    def _not_leader(n2):
+        return not _is_leader(staff_by_name.get(n2))
+
     for staff in staff_list:
         if not _is_leader(staff):
             continue
@@ -518,8 +573,7 @@ def generate_schedule(
             added = False
             for d in remaining:
                 r, (s, e) = all_candidates[(sname, d)]
-                if is_safe_to_add(sname, d, s, e):
-                    assigned[(sname, d)] = (r, (s, e))
+                if try_add_with_bump(sname, d, s, e, _not_leader):
                     added = True
                     break
             if not added:
@@ -566,7 +620,20 @@ def generate_schedule(
     # 希望日数が多い人（連勤上限などで間引かれやすい）ほど、絶対数だけでは
     # 守り切れず充足率が下がりやすい。MIN_RATIO_FLOORを下回っている場合は、
     # 外れていた候補から復活させて底上げする（連勤上限・上限人数などの
-    # 安全確認はそのまま維持する）。
+    # 安全確認はそのまま維持する）。上限人数だけがネックの場合は、
+    # リーダーではなく充足率にまだ余裕がある人に1人譲ってもらう。
+    def _bumpable_for_floor(n2):
+        if _is_leader(staff_by_name.get(n2)):
+            return False
+        req2 = requested_count[n2]
+        if req2 == 0:
+            return True
+        conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
+        post_conf2 = conf2 - 1
+        if req2 >= MIN_GUARANTEED_DAYS and post_conf2 <= MIN_GUARANTEED_DAYS:
+            return False
+        return (post_conf2 / req2) >= MIN_RATIO_FLOOR
+
     for staff in staff_list:
         sname = staff.name
         req = requested_count[sname]
@@ -586,8 +653,7 @@ def generate_schedule(
             added = False
             for d in remaining:
                 r, (s, e) = all_candidates[(sname, d)]
-                if is_safe_to_add(sname, d, s, e):
-                    assigned[(sname, d)] = (r, (s, e))
+                if try_add_with_bump(sname, d, s, e, _bumpable_for_floor):
                     added = True
                     break
             if not added:
