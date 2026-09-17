@@ -33,6 +33,7 @@ MIN_SHIFT_HOURS = 2.5  # これより短い勤務は割り当てない
 MIN_GUARANTEED_DAYS = 4  # この日数以上希望した人は、可能な限りこの日数を確保する
 LEADER_WAGE_THRESHOLD = 1500  # この時給以上のスタッフは「リーダー」として優先配置する
 LEADER_WEEKLY_TARGET = 3  # リーダーに目指してほしい週あたりの勤務日数
+LEADER_MONTHLY_TARGET = 10  # リーダーに目指してほしい月あたりの勤務日数
 
 
 def _is_leader(staff: Staff | None) -> bool:
@@ -312,11 +313,19 @@ def generate_schedule(
             c[sname] += 1
         return c
 
+    def total_cost():
+        total = 0.0
+        for (_sname, _d), (_r, (s, e)) in assigned.items():
+            staff = staff_by_name.get(_sname)
+            if staff:
+                total += max(0.0, e - s) * staff.hourly_wage
+        return total
+
     def removal_priority(sname, d, conf):
         """間引き候補の優先順位を返す（大きいほど先に外してよい）。
         希望日数が少ない人（MIN_GUARANTEED_DAYS以下しか希望していない人を
         除く）が最低保証日数を下回るような削除や、リーダー（時給が
-        LEADER_WAGE_THRESHOLD以上）が週の目標日数を下回るような削除は、
+        LEADER_WAGE_THRESHOLD以上）が週・月の目標日数を下回るような削除は、
         他に選択肢がない限り後回しにする。同着の場合はリーダー以外を
         優先的に外す。"""
         staff = staff_by_name.get(sname)
@@ -328,7 +337,7 @@ def generate_schedule(
         if leader:
             wk = _week_key(d)
             week_count = sum(1 for (n2, d2) in assigned if n2 == sname and _week_key(d2) == wk)
-            leader_under_target = week_count <= LEADER_WEEKLY_TARGET
+            leader_under_target = week_count <= LEADER_WEEKLY_TARGET or c <= LEADER_MONTHLY_TARGET
         protected = under_floor or leader_under_target
         # リーダー優先の同着判定は、どちらの保護対象でもない人同士の間でしか
         # 使わない。最低保証日数で守られている人を、リーダー優先を理由に
@@ -381,32 +390,36 @@ def generate_schedule(
                 removable.sort(key=lambda x: x[1], reverse=True)
                 del assigned[removable[0][0]]
 
-    # 平日に3人体制になった場合、人件費を抑えるため最も早く入る人の勤務
-    # 時間を短縮する（早く来た人が早めに帰る形にし、全員が閉館までフルで
-    # 入ることを避ける）。2人体制のときは変更しない。リーダー（時給が
-    # LEADER_WAGE_THRESHOLD以上）は校舎運営上長めに入ってほしいため、
-    # 他に短縮できる人がいる限り対象から外す。
+    # 予算内に収まらない場合に限り、平日で3人体制になっている日の中から
+    # 最も早く入る人の勤務時間を短縮してコストを抑える（早く来た人が
+    # 早めに帰る形にする）。予算に余裕があるときは時間をずらさず、
+    # 希望通りフルで入ってもらう。2人体制のときも変更しない。リーダー
+    # （時給がLEADER_WAGE_THRESHOLD以上）は校舎運営上長めに入ってほしい
+    # ため、他に短縮できる人がいる限り対象から外す。
     STAGGER_HOURS = 3.0
-    for day in days:
-        if day.day_type != "weekday":
-            continue
-        b = day_bands(day)
-        if not b:
-            continue
-        band = b[0]
-        members = [
-            (sname, s, e) for (sname, d), (_r, (s, e)) in assigned.items()
-            if d == day.date and _overlaps(s, e, band.start, band.end)
-        ]
-        if len(members) < 3:
-            continue
-        non_leader_members = [m for m in members if not _is_leader(staff_by_name.get(m[0]))]
-        pool = non_leader_members if non_leader_members else members
-        earliest_sname, s, e = min(pool, key=lambda x: x[1])
-        new_e = min(e, s + STAGGER_HOURS)
-        if new_e < e:
-            r, _ = assigned[(earliest_sname, day.date)]
-            assigned[(earliest_sname, day.date)] = (r, (s, new_e))
+    if total_cost() > budget:
+        for day in days:
+            if total_cost() <= budget:
+                break
+            if day.day_type != "weekday":
+                continue
+            b = day_bands(day)
+            if not b:
+                continue
+            band = b[0]
+            members = [
+                (sname, s, e) for (sname, d), (_r, (s, e)) in assigned.items()
+                if d == day.date and _overlaps(s, e, band.start, band.end)
+            ]
+            if len(members) < 3:
+                continue
+            non_leader_members = [m for m in members if not _is_leader(staff_by_name.get(m[0]))]
+            pool = non_leader_members if non_leader_members else members
+            earliest_sname, s, e = min(pool, key=lambda x: x[1])
+            new_e = min(e, s + STAGGER_HOURS)
+            if new_e < e:
+                r, _ = assigned[(earliest_sname, day.date)]
+                assigned[(earliest_sname, day.date)] = (r, (s, new_e))
 
     # 不足チェック（希望者だけでは満たせない枠）
     shortages = []
@@ -439,14 +452,6 @@ def generate_schedule(
                     "available": 0,
                     "message": f"開館時刻（{opening_band.start:g}時）に出勤している人がいません",
                 })
-
-    def total_cost():
-        total = 0.0
-        for (sname, d), (r, (s, e)) in assigned.items():
-            staff = staff_by_name.get(sname)
-            if staff:
-                total += max(0.0, e - s) * staff.hourly_wage
-        return total
 
     # 予算超過の場合は間引く
     cost = total_cost()
@@ -523,6 +528,31 @@ def generate_schedule(
                         break
                 if not added:
                     break
+
+    # 週の目標を満たしてもなお月間でLEADER_MONTHLY_TARGETに届いていない
+    # リーダーには、残っている候補から追加で復活させる（月末近くの週など、
+    # 週単位では埋めきれない分をここで補う）。
+    for staff in staff_list:
+        if not _is_leader(staff):
+            continue
+        sname = staff.name
+        cand_dates = sorted(d for (n2, d) in all_candidates if n2 == sname)
+        while True:
+            confirmed_this_month = sum(1 for d in cand_dates if (sname, d) in assigned)
+            if confirmed_this_month >= LEADER_MONTHLY_TARGET:
+                break
+            remaining = [d for d in cand_dates if (sname, d) not in assigned]
+            if not remaining:
+                break
+            added = False
+            for d in remaining:
+                r, (s, e) = all_candidates[(sname, d)]
+                if is_safe_to_add(sname, d, s, e):
+                    assigned[(sname, d)] = (r, (s, e))
+                    added = True
+                    break
+            if not added:
+                break
 
     for sname, all_dates in candidate_dates_by_staff.items():
         all_dates = sorted(all_dates)
