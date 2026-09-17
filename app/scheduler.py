@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import datetime
+import math
 from collections import defaultdict
 
 from .models import Assignment, Band, DayInfo, RequestEntry, ScheduleResult, Staff
@@ -31,17 +32,13 @@ from .models import Assignment, Band, DayInfo, RequestEntry, ScheduleResult, Sta
 ONE_DAY = datetime.timedelta(days=1)
 MIN_SHIFT_HOURS = 2.5  # これより短い勤務は割り当てない
 MIN_GUARANTEED_DAYS = 4  # この日数以上希望した人は、可能な限りこの日数を確保する
+MIN_RATIO_FLOOR = 0.4  # 希望日数が多い人でも、充足率がこれを下回らないようにする
 LEADER_WAGE_THRESHOLD = 1500  # この時給以上のスタッフは「リーダー」として優先配置する
-LEADER_WEEKLY_TARGET = 3  # リーダーに目指してほしい週あたりの勤務日数
-LEADER_MONTHLY_TARGET = 10  # リーダーに目指してほしい月あたりの勤務日数
+LEADER_MONTHLY_TARGET = 10  # リーダーに目指してほしい月あたりの勤務日数（これに届いたら以降は充足率を優先）
 
 
 def _is_leader(staff: Staff | None) -> bool:
     return staff is not None and staff.hourly_wage >= LEADER_WAGE_THRESHOLD
-
-
-def _week_key(d: datetime.date):
-    return d.isocalendar()[:2]
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -331,15 +328,14 @@ def generate_schedule(
         staff = staff_by_name.get(sname)
         req = requested_count[sname]
         c = conf[sname]
-        under_floor = req >= MIN_GUARANTEED_DAYS and c <= MIN_GUARANTEED_DAYS
+        ratio_now = c / req if req else 0
+        under_floor = (req >= MIN_GUARANTEED_DAYS and c <= MIN_GUARANTEED_DAYS) or (req > 0 and ratio_now <= MIN_RATIO_FLOOR)
         leader = _is_leader(staff)
-        leader_under_target = False
-        if leader:
-            wk = _week_key(d)
-            week_count = sum(1 for (n2, d2) in assigned if n2 == sname and _week_key(d2) == wk)
-            leader_under_target = week_count <= LEADER_WEEKLY_TARGET or c <= LEADER_MONTHLY_TARGET
+        # リーダーの保護は月間の目標日数のみで判定する。月10回に届いたら
+        # それ以上は特別扱いせず、他のスタッフと同じく充足率で判断する。
+        leader_under_target = leader and c < LEADER_MONTHLY_TARGET
         protected = under_floor or leader_under_target
-        ratio = c / req if req else 0
+        ratio = ratio_now
         # 充足率（ratio）を優先順位の主軸にする。リーダーかどうかは、
         # 充足率が同点のときにだけ働く最後のタイブレークにとどめる
         # （そうしないと、非リーダーは充足率に関係なく全員が先に
@@ -503,36 +499,40 @@ def generate_schedule(
     for (sname, d) in all_candidates:
         candidate_dates_by_staff[sname].append(d)
 
-    # リーダー（時給がLEADER_WAGE_THRESHOLD以上）は校舎運営上重要なため、
-    # 間引きの結果に関わらず、週あたりの勤務日数がLEADER_WEEKLY_TARGETに
-    # 届いていなければ、外れていた候補から優先的に復活させる。
+    # 希望日数が多い人（連勤上限などで間引かれやすい）ほど、絶対数だけでは
+    # 守り切れず充足率が下がりやすい。MIN_RATIO_FLOORを下回っている場合は、
+    # 外れていた候補から復活させて底上げする（連勤上限・上限人数などの
+    # 安全確認はそのまま維持する）。
     for staff in staff_list:
-        if not _is_leader(staff):
-            continue
         sname = staff.name
+        req = requested_count[sname]
+        if req == 0:
+            continue
+        target = math.ceil(req * MIN_RATIO_FLOOR)
+        if req >= MIN_GUARANTEED_DAYS:
+            target = max(target, MIN_GUARANTEED_DAYS)
         cand_dates = sorted(d for (n2, d) in all_candidates if n2 == sname)
-        for wk in sorted(set(_week_key(d) for d in cand_dates)):
-            week_dates = [d for d in cand_dates if _week_key(d) == wk]
-            while True:
-                confirmed_this_week = sum(1 for d in week_dates if (sname, d) in assigned)
-                if confirmed_this_week >= LEADER_WEEKLY_TARGET:
+        while True:
+            confirmed_now = sum(1 for d in cand_dates if (sname, d) in assigned)
+            if confirmed_now >= target:
+                break
+            remaining = [d for d in cand_dates if (sname, d) not in assigned]
+            if not remaining:
+                break
+            added = False
+            for d in remaining:
+                r, (s, e) = all_candidates[(sname, d)]
+                if is_safe_to_add(sname, d, s, e):
+                    assigned[(sname, d)] = (r, (s, e))
+                    added = True
                     break
-                remaining = [d for d in week_dates if (sname, d) not in assigned]
-                if not remaining:
-                    break
-                added = False
-                for d in remaining:
-                    r, (s, e) = all_candidates[(sname, d)]
-                    if is_safe_to_add(sname, d, s, e):
-                        assigned[(sname, d)] = (r, (s, e))
-                        added = True
-                        break
-                if not added:
-                    break
+            if not added:
+                break
 
-    # 週の目標を満たしてもなお月間でLEADER_MONTHLY_TARGETに届いていない
-    # リーダーには、残っている候補から追加で復活させる（月末近くの週など、
-    # 週単位では埋めきれない分をここで補う）。
+    # リーダー（時給がLEADER_WAGE_THRESHOLD以上）は校舎運営上重要なため、
+    # 間引きの結果に関わらず、月あたりの勤務日数がLEADER_MONTHLY_TARGETに
+    # 届いていなければ、外れていた候補から優先的に復活させる。10回に
+    # 届いたらそれ以上は特別扱いしない。
     for staff in staff_list:
         if not _is_leader(staff):
             continue
