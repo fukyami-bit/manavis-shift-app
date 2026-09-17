@@ -665,24 +665,46 @@ def generate_schedule(
     # 希望日数が少ない人ほど充足率が高くなるようにする（_target_days）。
     # 目標日数に届いていない場合は、外れていた候補から復活させて底上げ
     # する（連勤上限・上限人数などの安全確認はそのまま維持する）。上限
-    # 人数だけがネックの場合は、リーダーではなく自分自身の目標を満たして
-    # なお余裕がある人に1人譲ってもらう。
-    def _bumpable_for_floor(n2):
-        if _is_leader(staff_by_name.get(n2)):
-            return False
+    # 人数だけがネックの場合は、リーダー・小口保証枠が優先されることで
+    # 割を食う中間層が出ないよう、「今の自分より充足率が高い非リーダー」
+    # からなら誰でも1人譲ってもらえるようにする（比較の公平性を優先）。
+    def confirmed_ratio(n2):
         req2 = requested_count[n2]
         if req2 == 0:
-            return True
+            return 1.0
         conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
-        return (conf2 - 1) >= _target_days(req2)
+        return conf2 / req2
 
-    for staff in staff_list:
+    def own_floor(n2):
+        """このスタッフ自身に保証されている最低ライン（小口保証枠は
+        60%保証も加味する）。比較の公平性で他の人から譲ってもらう際にも
+        これを下回らせない。"""
+        req2 = requested_count[n2]
+        floor = _target_days(req2)
+        if req2 <= SMALL_REQUEST_THRESHOLD:
+            floor = max(floor, math.ceil(req2 * SMALL_REQUEST_RATIO_GUARANTEE))
+        return floor
+
+    # 充足率が低い人から順に処理することで、一番困っている人から優先的に
+    # 埋めていく。
+    ordered_staff = sorted(
+        (s for s in staff_list if requested_count[s.name] > 0),
+        key=lambda s: confirmed_ratio(s.name),
+    )
+    for staff in ordered_staff:
         sname = staff.name
         req = requested_count[sname]
-        if req == 0:
-            continue
         target = _target_days(req)
         cand_dates = sorted(d for (n2, d) in all_candidates if n2 == sname)
+
+        def _bumpable_relative(n2, _sname=sname):
+            if _is_leader(staff_by_name.get(n2)):
+                return False
+            if confirmed_ratio(n2) <= confirmed_ratio(_sname):
+                return False
+            conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
+            return (conf2 - 1) >= own_floor(n2)
+
         while True:
             confirmed_now = sum(1 for d in cand_dates if (sname, d) in assigned)
             if confirmed_now >= target:
@@ -693,7 +715,7 @@ def generate_schedule(
             added = False
             for d in remaining:
                 r, (s, e) = all_candidates[(sname, d)]
-                if try_add_with_bump(sname, d, s, e, _bumpable_for_floor):
+                if try_add_with_bump(sname, d, s, e, _bumpable_relative):
                     added = True
                     break
             if not added:
