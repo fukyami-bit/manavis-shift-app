@@ -675,16 +675,6 @@ def generate_schedule(
         conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
         return conf2 / req2
 
-    def own_floor(n2):
-        """このスタッフ自身に保証されている最低ライン（小口保証枠は
-        60%保証も加味する）。比較の公平性で他の人から譲ってもらう際にも
-        これを下回らせない。"""
-        req2 = requested_count[n2]
-        floor = _target_days(req2)
-        if req2 <= SMALL_REQUEST_THRESHOLD:
-            floor = max(floor, math.ceil(req2 * SMALL_REQUEST_RATIO_GUARANTEE))
-        return floor
-
     # 充足率が低い人から順に処理することで、一番困っている人から優先的に
     # 埋めていく。
     ordered_staff = sorted(
@@ -700,10 +690,20 @@ def generate_schedule(
         def _bumpable_relative(n2, _sname=sname):
             if _is_leader(staff_by_name.get(n2)):
                 return False
-            if confirmed_ratio(n2) <= confirmed_ratio(_sname):
+            ratio_self = confirmed_ratio(_sname)
+            if confirmed_ratio(n2) <= ratio_self:
                 return False
+            req2 = requested_count[n2]
             conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
-            return (conf2 - 1) >= own_floor(n2)
+            if req2 <= SMALL_REQUEST_THRESHOLD:
+                # 小口保証枠の60%だけは死守する
+                guarantee = math.ceil(req2 * SMALL_REQUEST_RATIO_GUARANTEE)
+                return (conf2 - 1) >= guarantee
+            # それ以外は「逆転しない」（譲った後も自分の元の充足率より
+            # 下がらない）ことだけを条件にする。お互いが目標未達のまま
+            # 膠着するのを避け、少しずつ差を縮められるようにするため。
+            post_ratio2 = (conf2 - 1) / req2 if req2 else 1.0
+            return post_ratio2 >= ratio_self
 
         while True:
             confirmed_now = sum(1 for d in cand_dates if (sname, d) in assigned)
@@ -748,6 +748,37 @@ def generate_schedule(
                 if added_any:
                     break  # confirmed_datesが古くなったので最初からやり直す
             if not added_any:
+                break
+
+    # 小口保証枠(希望11日以下)の60%保証を、他のパスによる巻き戻しが
+    # ないか最後にもう一度確認する。この段階では、11日を超える非リーダー
+    # からであれば充足率の比較なしに譲ってもらえる（保証を最優先する）。
+    def _bumpable_for_small_guarantee_final(n2):
+        if _is_leader(staff_by_name.get(n2)):
+            return False
+        return requested_count[n2] > SMALL_REQUEST_THRESHOLD
+
+    for staff in staff_list:
+        sname = staff.name
+        req = requested_count[sname]
+        if req == 0 or req > SMALL_REQUEST_THRESHOLD:
+            continue
+        target = math.ceil(req * SMALL_REQUEST_RATIO_GUARANTEE)
+        cand_dates = sorted(d for (n2, d) in all_candidates if n2 == sname)
+        while True:
+            confirmed_now = sum(1 for d in cand_dates if (sname, d) in assigned)
+            if confirmed_now >= target:
+                break
+            remaining = [d for d in cand_dates if (sname, d) not in assigned]
+            if not remaining:
+                break
+            added = False
+            for d in remaining:
+                r, (s, e) = all_candidates[(sname, d)]
+                if try_add_with_bump(sname, d, s, e, _bumpable_for_small_guarantee_final):
+                    added = True
+                    break
+            if not added:
                 break
 
     # 文系のみ／理系のみの出勤が2日連続していないかの最終チェック
