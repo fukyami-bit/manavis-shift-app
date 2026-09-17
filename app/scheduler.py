@@ -31,14 +31,26 @@ from .models import Assignment, Band, DayInfo, RequestEntry, ScheduleResult, Sta
 
 ONE_DAY = datetime.timedelta(days=1)
 MIN_SHIFT_HOURS = 2.5  # これより短い勤務は割り当てない
-MIN_GUARANTEED_DAYS = 4  # この日数以上希望した人は、可能な限りこの日数を確保する
-MIN_RATIO_FLOOR = 0.55  # 希望日数が多い人でも、充足率がこれを下回らないようにする
+MIN_GUARANTEED_DAYS = 4  # この日数までの希望は、できる限りすべて通すことを目標にする
+RATIO_TARGET_SLOPE = 0.4  # MIN_GUARANTEED_DAYSを超えた希望日数のうち、目標日数に上乗せする割合
 LEADER_WAGE_THRESHOLD = 1500  # この時給以上のスタッフは「リーダー」として優先配置する
 LEADER_MONTHLY_TARGET = 10  # リーダーに目指してほしい月あたりの勤務日数（これに届いたら以降は充足率を優先）
 
 
 def _is_leader(staff: Staff | None) -> bool:
     return staff is not None and staff.hourly_wage >= LEADER_WAGE_THRESHOLD
+
+
+def _target_days(req: int) -> int:
+    """希望日数に対する目標確定日数。希望が少ない人ほど充足率が高くなる
+    よう、MIN_GUARANTEED_DAYSまでは全部、それを超えた分はRATIO_TARGET_SLOPE
+    の割合だけ上乗せする右肩下がりの目標にする。"""
+    if req <= 0:
+        return 0
+    if req <= MIN_GUARANTEED_DAYS:
+        return req
+    extra = req - MIN_GUARANTEED_DAYS
+    return MIN_GUARANTEED_DAYS + math.ceil(extra * RATIO_TARGET_SLOPE)
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -328,14 +340,13 @@ def generate_schedule(
         staff = staff_by_name.get(sname)
         req = requested_count[sname]
         c = conf[sname]
-        ratio_now = c / req if req else 0
-        under_floor = (req >= MIN_GUARANTEED_DAYS and c <= MIN_GUARANTEED_DAYS) or (req > 0 and ratio_now <= MIN_RATIO_FLOOR)
+        under_floor = req > 0 and c <= _target_days(req)
         leader = _is_leader(staff)
         # リーダーの保護は月間の目標日数のみで判定する。月10回に届いたら
         # それ以上は特別扱いせず、他のスタッフと同じく充足率で判断する。
         leader_under_target = leader and c < LEADER_MONTHLY_TARGET
         protected = under_floor or leader_under_target
-        ratio = ratio_now
+        ratio = c / req if req else 0
         # 充足率（ratio）を優先順位の主軸にする。リーダーかどうかは、
         # 充足率が同点のときにだけ働く最後のタイブレークにとどめる
         # （そうしないと、非リーダーは充足率に関係なく全員が先に
@@ -617,11 +628,11 @@ def generate_schedule(
                 assigned[(sname, d2)] = (r, (new_s, new_e))
                 break
 
-    # 希望日数が多い人（連勤上限などで間引かれやすい）ほど、絶対数だけでは
-    # 守り切れず充足率が下がりやすい。MIN_RATIO_FLOORを下回っている場合は、
-    # 外れていた候補から復活させて底上げする（連勤上限・上限人数などの
-    # 安全確認はそのまま維持する）。上限人数だけがネックの場合は、
-    # リーダーではなく充足率にまだ余裕がある人に1人譲ってもらう。
+    # 希望日数が少ない人ほど充足率が高くなるようにする（_target_days）。
+    # 目標日数に届いていない場合は、外れていた候補から復活させて底上げ
+    # する（連勤上限・上限人数などの安全確認はそのまま維持する）。上限
+    # 人数だけがネックの場合は、リーダーではなく自分自身の目標を満たして
+    # なお余裕がある人に1人譲ってもらう。
     def _bumpable_for_floor(n2):
         if _is_leader(staff_by_name.get(n2)):
             return False
@@ -629,19 +640,14 @@ def generate_schedule(
         if req2 == 0:
             return True
         conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
-        post_conf2 = conf2 - 1
-        if req2 >= MIN_GUARANTEED_DAYS and post_conf2 <= MIN_GUARANTEED_DAYS:
-            return False
-        return (post_conf2 / req2) >= MIN_RATIO_FLOOR
+        return (conf2 - 1) >= _target_days(req2)
 
     for staff in staff_list:
         sname = staff.name
         req = requested_count[sname]
         if req == 0:
             continue
-        target = math.ceil(req * MIN_RATIO_FLOOR)
-        if req >= MIN_GUARANTEED_DAYS:
-            target = max(target, MIN_GUARANTEED_DAYS)
+        target = _target_days(req)
         cand_dates = sorted(d for (n2, d) in all_candidates if n2 == sname)
         while True:
             confirmed_now = sum(1 for d in cand_dates if (sname, d) in assigned)
