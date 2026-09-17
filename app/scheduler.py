@@ -15,6 +15,9 @@
   ことを優先する。どうしても無理な場合は仕方ないが、2日連続にはしない。
 - 予算・上限人数を超える場合は間引く。間引く際は「確定日数/希望日数」の
   比率が高いスタッフから優先的に外し、公平性を保つ。
+- 時給がリーダー水準（既定1,500円以上）のスタッフは校舎運営上重要なため、
+  間引きで優先的に保護し、週3日を目安に優先的に配置する。平日3人体制の
+  時間短縮の対象からも外し、なるべく長め（1コマ分）に勤務してもらう。
 - 希望者だけでは必要人数を満たせない日・2日連続の偏りを解消できない日は
   「不足」としてそのまま報告する（実在しない人員を作ることはできないため）。
 """
@@ -28,6 +31,16 @@ from .models import Assignment, Band, DayInfo, RequestEntry, ScheduleResult, Sta
 ONE_DAY = datetime.timedelta(days=1)
 MIN_SHIFT_HOURS = 2.5  # これより短い勤務は割り当てない
 MIN_GUARANTEED_DAYS = 4  # この日数以上希望した人は、可能な限りこの日数を確保する
+LEADER_WAGE_THRESHOLD = 1500  # この時給以上のスタッフは「リーダー」として優先配置する
+LEADER_WEEKLY_TARGET = 3  # リーダーに目指してほしい週あたりの勤務日数
+
+
+def _is_leader(staff: Staff | None) -> bool:
+    return staff is not None and staff.hourly_wage >= LEADER_WAGE_THRESHOLD
+
+
+def _week_key(d: datetime.date):
+    return d.isocalendar()[:2]
 
 
 def _overlaps(a_start: float, a_end: float, b_start: float, b_end: float) -> bool:
@@ -299,16 +312,30 @@ def generate_schedule(
             c[sname] += 1
         return c
 
-    def removal_priority(sname, conf):
+    def removal_priority(sname, d, conf):
         """間引き候補の優先順位を返す（大きいほど先に外してよい）。
         希望日数が少ない人（MIN_GUARANTEED_DAYS以下しか希望していない人を
-        除く）が最低保証日数を下回るような削除は、他に選択肢がない限り
-        後回しにする。"""
+        除く）が最低保証日数を下回るような削除や、リーダー（時給が
+        LEADER_WAGE_THRESHOLD以上）が週の目標日数を下回るような削除は、
+        他に選択肢がない限り後回しにする。同着の場合はリーダー以外を
+        優先的に外す。"""
+        staff = staff_by_name.get(sname)
         req = requested_count[sname]
         c = conf[sname]
         under_floor = req >= MIN_GUARANTEED_DAYS and c <= MIN_GUARANTEED_DAYS
+        leader = _is_leader(staff)
+        leader_under_target = False
+        if leader:
+            wk = _week_key(d)
+            week_count = sum(1 for (n2, d2) in assigned if n2 == sname and _week_key(d2) == wk)
+            leader_under_target = week_count <= LEADER_WEEKLY_TARGET
+        protected = under_floor or leader_under_target
+        # リーダー優先の同着判定は、どちらの保護対象でもない人同士の間でしか
+        # 使わない。最低保証日数で守られている人を、リーダー優先を理由に
+        # 先に外してしまわないようにするため。
+        non_leader_tiebreak = 0 if protected else (1 if not leader else 0)
         ratio = c / req if req else 0
-        return (0 if under_floor else 1, ratio)
+        return (0 if protected else 1, non_leader_tiebreak, ratio)
 
     # 連勤上限（原則3連勤まで）。人手が足りず外せない場合のみ超過を許容する。
     MAX_CONSECUTIVE_DAYS = 3
@@ -348,7 +375,7 @@ def generate_schedule(
                     if d != day.date or not _overlaps(s, e, band.start, band.end):
                         continue
                     if is_safe_to_remove(sname, d, s, e):
-                        removable.append(((sname, d), removal_priority(sname, conf)))
+                        removable.append(((sname, d), removal_priority(sname, d, conf)))
                 if not removable:
                     break
                 removable.sort(key=lambda x: x[1], reverse=True)
@@ -356,7 +383,9 @@ def generate_schedule(
 
     # 平日に3人体制になった場合、人件費を抑えるため最も早く入る人の勤務
     # 時間を短縮する（早く来た人が早めに帰る形にし、全員が閉館までフルで
-    # 入ることを避ける）。2人体制のときは変更しない。
+    # 入ることを避ける）。2人体制のときは変更しない。リーダー（時給が
+    # LEADER_WAGE_THRESHOLD以上）は校舎運営上長めに入ってほしいため、
+    # 他に短縮できる人がいる限り対象から外す。
     STAGGER_HOURS = 3.0
     for day in days:
         if day.day_type != "weekday":
@@ -371,7 +400,9 @@ def generate_schedule(
         ]
         if len(members) < 3:
             continue
-        earliest_sname, s, e = min(members, key=lambda x: x[1])
+        non_leader_members = [m for m in members if not _is_leader(staff_by_name.get(m[0]))]
+        pool = non_leader_members if non_leader_members else members
+        earliest_sname, s, e = min(pool, key=lambda x: x[1])
         new_e = min(e, s + STAGGER_HOURS)
         if new_e < e:
             r, _ = assigned[(earliest_sname, day.date)]
@@ -428,7 +459,7 @@ def generate_schedule(
                 if not staff:
                     continue
                 if is_safe_to_remove(sname, d, s, e):
-                    removable.append(((sname, d), removal_priority(sname, conf), staff.hourly_wage))
+                    removable.append(((sname, d), removal_priority(sname, d, conf), staff.hourly_wage))
 
             if not removable:
                 warnings.append(f"予算超過: 必要人数を維持したままではこれ以上削減できません（残り超過額 約{int(cost - budget):,}円）")
@@ -465,6 +496,33 @@ def generate_schedule(
     candidate_dates_by_staff = defaultdict(list)
     for (sname, d) in all_candidates:
         candidate_dates_by_staff[sname].append(d)
+
+    # リーダー（時給がLEADER_WAGE_THRESHOLD以上）は校舎運営上重要なため、
+    # 間引きの結果に関わらず、週あたりの勤務日数がLEADER_WEEKLY_TARGETに
+    # 届いていなければ、外れていた候補から優先的に復活させる。
+    for staff in staff_list:
+        if not _is_leader(staff):
+            continue
+        sname = staff.name
+        cand_dates = sorted(d for (n2, d) in all_candidates if n2 == sname)
+        for wk in sorted(set(_week_key(d) for d in cand_dates)):
+            week_dates = [d for d in cand_dates if _week_key(d) == wk]
+            while True:
+                confirmed_this_week = sum(1 for d in week_dates if (sname, d) in assigned)
+                if confirmed_this_week >= LEADER_WEEKLY_TARGET:
+                    break
+                remaining = [d for d in week_dates if (sname, d) not in assigned]
+                if not remaining:
+                    break
+                added = False
+                for d in remaining:
+                    r, (s, e) = all_candidates[(sname, d)]
+                    if is_safe_to_add(sname, d, s, e):
+                        assigned[(sname, d)] = (r, (s, e))
+                        added = True
+                        break
+                if not added:
+                    break
 
     for sname, all_dates in candidate_dates_by_staff.items():
         all_dates = sorted(all_dates)
