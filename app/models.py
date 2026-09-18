@@ -85,6 +85,7 @@ class ScheduleResult:
     assignments: list  # list[Assignment]
     shortages: list  # list[dict]
     warnings: list  # list[str]
-    total_cost: float
-    budget: int
+    total_cost: float  # 月全体（1日〜月末）の合計人件費
+    budget: int  # 今回の締め期間（1〜25日分）に適用した予算
     staff_stats: dict  # name -> {"confirmed": int, "requested": int, "ratio": float}
+    period_cost: float = 0.0  # 今回の締め期間分（1〜25日）の人件費。budgetと比較する対象

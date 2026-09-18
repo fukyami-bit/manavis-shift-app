@@ -7,7 +7,7 @@ import streamlit as st
 from app.exporter import build_template_workbook, format_time
 from app.models import Band
 from app.parser import parse_workbook
-from app.scheduler import compute_cost_from_shift, default_bands, generate_schedule
+from app.scheduler import compute_cost_from_shift, compute_period_cost, default_bands, generate_schedule
 
 st.set_page_config(page_title="マナビス シフト作成", layout="wide")
 st.title("シフト自動作成")
@@ -27,7 +27,10 @@ mode = st.radio(
     key="mode_radio",
 )
 if st.session_state.get("mode") != mode:
-    for key in ("parsed", "original_bytes", "uploaded_name", "result", "cost_result"):
+    for key in (
+        "parsed", "original_bytes", "uploaded_name", "result", "cost_result",
+        "carryover_cost", "current_period_cost", "current_next_period_cost",
+    ):
         st.session_state.pop(key, None)
     st.session_state.step = "upload"
 st.session_state.mode = mode
@@ -91,6 +94,33 @@ def render_wage_editor(parsed):
     }
 
 
+def render_previous_month_uploader(uploader_key: str, staff_wages: dict) -> float:
+    """前月の確定シフトをアップロードしてもらい、26日〜月末分の人件費
+    （＝今回の締め期間に繰り越すべきコスト）を計算して返す。"""
+    st.subheader("前月の確定シフト（任意）")
+    st.caption(
+        "人件費の締め日は毎月26日〜翌25日です。前月の確定シフトをアップロードすると、"
+        "前月26日〜月末分の人件費を自動計算し、今回の予算からあらかじめ差し引きます。"
+    )
+    prev_uploaded = st.file_uploader(
+        "前月の確定シフトExcel(.xlsx)（未アップロードの場合、繰越人件費は0円として扱います）",
+        type=["xlsx"], key=uploader_key,
+    )
+    if prev_uploaded is None:
+        return 0.0
+    try:
+        prev_parsed = parse_workbook(io.BytesIO(prev_uploaded.getvalue()))
+    except Exception as e:
+        st.error(f"前月シフトの読み込みに失敗しました: {e}")
+        return 0.0
+    prev_staff = [
+        replace(s, hourly_wage=staff_wages.get(s.name, s.hourly_wage)) for s in prev_parsed.staff
+    ]
+    carryover = compute_period_cost(prev_staff, prev_parsed.days, prev_parsed.requests, min_day=26, max_day=31)
+    st.info(f"前月26日〜月末分の人件費（今回への繰越分）: ¥{int(carryover):,}")
+    return carryover
+
+
 if st.session_state.step in ("configure", "result") and "parsed" in st.session_state:
     parsed = st.session_state.parsed
 
@@ -98,9 +128,18 @@ if st.session_state.step in ("configure", "result") and "parsed" in st.session_s
         st.header("2. スタッフの時給を確認")
         render_wage_editor(parsed)
 
+        carryover_cost = render_previous_month_uploader("prev_uploader_cost", st.session_state.wages)
+
         if st.button("人件費を計算", type="primary"):
             staff_with_wages = [replace(s, hourly_wage=st.session_state.wages[s.name]) for s in parsed.staff]
             st.session_state.cost_result = compute_cost_from_shift(staff_with_wages, parsed.days, parsed.requests)
+            st.session_state.carryover_cost = carryover_cost
+            st.session_state.current_period_cost = compute_period_cost(
+                staff_with_wages, parsed.days, parsed.requests, min_day=1, max_day=25,
+            )
+            st.session_state.current_next_period_cost = compute_period_cost(
+                staff_with_wages, parsed.days, parsed.requests, min_day=26, max_day=31,
+            )
             st.session_state.step = "result"
     else:
         st.header("2. 設定確認")
@@ -138,9 +177,21 @@ if st.session_state.step in ("configure", "result") and "parsed" in st.session_s
                 new_bands[day_type] = new_list
             st.session_state.bands = new_bands
 
-            st.subheader("今月の予算")
-            budget = st.number_input("人件費の上限（円）", min_value=0, value=st.session_state.get("budget", 450000), step=10000)
-            st.session_state.budget = budget
+            st.subheader("今回の締め期間の予算")
+            st.caption("人件費の締め日は毎月26日〜翌25日です。ここには前月26日〜今月25日の期間全体の予算を入力してください。")
+            carryover_cost = render_previous_month_uploader("prev_uploader_create", st.session_state.wages)
+            st.session_state.carryover_cost = carryover_cost
+            budget_input = st.number_input(
+                "今回の締め期間の人件費予算（円）", min_value=0,
+                value=st.session_state.get("budget_input", 450000), step=10000,
+            )
+            st.session_state.budget_input = budget_input
+            effective_budget = max(0, int(budget_input - carryover_cost))
+            st.session_state.budget = effective_budget
+            if carryover_cost > 0:
+                st.caption(
+                    f"→ 前月繰越分 ¥{int(carryover_cost):,} を差し引いた、今月1〜25日分の人件費上限: ¥{effective_budget:,}"
+                )
 
         if st.button("この内容でシフトを作成", type="primary"):
             staff_with_wages = [replace(s, hourly_wage=st.session_state.wages[s.name]) for s in parsed.staff]
@@ -154,7 +205,21 @@ if st.session_state.step == "result" and is_cost_mode and "cost_result" in st.se
     cost_result = st.session_state.cost_result
 
     st.header("3. 人件費")
-    st.metric("合計人件費", f"¥{int(cost_result.total_cost):,}")
+    st.metric("合計人件費（今月1日〜月末）", f"¥{int(cost_result.total_cost):,}")
+
+    carryover_cost = st.session_state.get("carryover_cost", 0.0)
+    current_period_cost = st.session_state.get("current_period_cost", 0.0)
+    current_next_period_cost = st.session_state.get("current_next_period_cost", 0.0)
+    pay_period_total = carryover_cost + current_period_cost
+
+    st.subheader("締め期間（前月26日〜今月25日）ベースの人件費")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("前月26日〜月末（繰越分）", f"¥{int(carryover_cost):,}")
+    c2.metric("今月1日〜25日", f"¥{int(current_period_cost):,}")
+    c3.metric("今回の締め期間 合計", f"¥{int(pay_period_total):,}")
+    st.caption(
+        f"今月26日〜月末分（¥{int(current_next_period_cost):,}）は次回の締め期間（今月26日〜来月25日）の人件費として扱われます。"
+    )
 
     if parsed.warnings:
         with st.expander(f"読み取り時の注意 {len(parsed.warnings)}件"):
@@ -181,12 +246,21 @@ if st.session_state.step == "result" and not is_cost_mode and "result" in st.ses
 
     st.header("3. 結果")
 
+    carryover_cost = st.session_state.get("carryover_cost", 0.0)
+
     m1, m2, m3 = st.columns(3)
-    m1.metric("人件費 / 予算", f"¥{int(result.total_cost):,}", f"予算 ¥{result.budget:,}")
+    m1.metric("人件費(今月1〜25日) / 予算", f"¥{int(result.period_cost):,}", f"予算 ¥{result.budget:,}")
     m2.metric("不足コマ", f"{len(result.shortages)}件")
     ratios = [v["ratio"] for v in result.staff_stats.values() if v["ratio"] is not None]
     spread = (max(ratios) - min(ratios)) * 100 if ratios else 0
     m3.metric("希望充足の偏り", f"{spread:.0f}pt", "最大と最小の差")
+
+    next_period_cost = result.total_cost - result.period_cost
+    st.caption(
+        f"今回の締め期間 合計: ¥{int(carryover_cost + result.period_cost):,}"
+        f"（前月繰越 ¥{int(carryover_cost):,} + 今月1〜25日 ¥{int(result.period_cost):,}）／"
+        f"今月26日〜月末分 ¥{int(next_period_cost):,} は次回の締め期間で精算されます。"
+    )
 
     if result.shortages:
         with st.expander(f"不足・要確認 {len(result.shortages)}件", expanded=True):

@@ -37,6 +37,10 @@ LEADER_WAGE_THRESHOLD = 1500  # この時給以上のスタッフは「リーダ
 LEADER_MONTHLY_TARGET = 10  # リーダーに目指してほしい月あたりの勤務日数（これに届いたら以降は充足率を優先）
 SMALL_REQUEST_THRESHOLD = 11  # この日数以下の希望者は、下の充足率を確実に達成させる
 SMALL_REQUEST_RATIO_GUARANTEE = 0.6  # SMALL_REQUEST_THRESHOLD以下の希望者に確実に保証する充足率
+PAY_PERIOD_CUTOFF_DAY = 25  # 人件費の締め日は毎月25日（26日〜翌25日が1期間）。
+# 予算は「26日〜翌25日」の1期間単位で管理する。この月のシフトのうち
+# 1〜25日分は今回の締め期間、26日〜月末分は次回の締め期間に属するため、
+# 予算の判定・間引きは1〜25日分のコストだけを対象に行う。
 
 
 def _is_leader(staff: Staff | None) -> bool:
@@ -95,6 +99,39 @@ def _expand_range(entry: RequestEntry, day: DayInfo):
             return None
         return s, e
     return None
+
+
+def compute_period_cost(
+    staff_list: list[Staff],
+    days: list[DayInfo],
+    requests: list[RequestEntry],
+    min_day: int = 1,
+    max_day: int = 31,
+) -> float:
+    """確定済みシフトのうち、日付が[min_day, max_day]（各月の日にち）の
+    範囲内にあるものだけの人件費を集計する。前月シフトの26日〜月末分の
+    繰越コストや、当月シフトの1〜25日分・26日〜月末分を個別に計算する
+    のに使う。"""
+    staff_by_name = {s.name: s for s in staff_list}
+    days_by_date = {d.date: d for d in days}
+    total = 0.0
+    for r in requests:
+        if not r.has_range():
+            continue
+        if not (min_day <= r.date.day <= max_day):
+            continue
+        day = days_by_date.get(r.date)
+        if day is None:
+            continue
+        rng = _expand_range(r, day)
+        if rng is None:
+            continue
+        s, e = rng
+        staff = staff_by_name.get(r.staff)
+        if staff is None:
+            continue
+        total += max(0.0, e - s) * staff.hourly_wage
+    return total
 
 
 def compute_cost_from_shift(
@@ -337,6 +374,19 @@ def generate_schedule(
                 total += max(0.0, e - s) * staff.hourly_wage
         return total
 
+    def period_cost():
+        """予算（budget引数）は今回の締め期間の1〜25日分にのみ適用する。
+        26日〜月末分は次回の締め期間の予算で管理するため、ここでは
+        対象外とする。"""
+        total = 0.0
+        for (_sname, _d), (_r, (s, e)) in assigned.items():
+            if _d.day > PAY_PERIOD_CUTOFF_DAY:
+                continue
+            staff = staff_by_name.get(_sname)
+            if staff:
+                total += max(0.0, e - s) * staff.hourly_wage
+        return total
+
     def removal_priority(sname, d, conf):
         """間引き候補の優先順位を返す（大きいほど先に外してよい）。
         希望日数が少ない人（MIN_GUARANTEED_DAYS以下しか希望していない人を
@@ -412,10 +462,12 @@ def generate_schedule(
     # （時給がLEADER_WAGE_THRESHOLD以上）は校舎運営上長めに入ってほしい
     # ため、他に短縮できる人がいる限り対象から外す。
     STAGGER_HOURS = 3.0
-    if total_cost() > budget:
+    if period_cost() > budget:
         for day in days:
-            if total_cost() <= budget:
+            if period_cost() <= budget:
                 break
+            if day.date.day > PAY_PERIOD_CUTOFF_DAY:
+                continue
             if day.day_type != "weekday":
                 continue
             b = day_bands(day)
@@ -468,13 +520,16 @@ def generate_schedule(
                     "message": f"開館時刻（{opening_band.start:g}時）に出勤している人がいません",
                 })
 
-    # 予算超過の場合は間引く
-    cost = total_cost()
+    # 予算超過の場合は間引く（対象は今回の締め期間分＝1〜25日のみ。
+    # 26日〜月末分は次回の締め期間の予算で管理する）
+    cost = period_cost()
     if cost > budget:
         while cost > budget:
             conf = confirmed_count()
             removable = []
             for (sname, d), (r, (s, e)) in assigned.items():
+                if d.day > PAY_PERIOD_CUTOFF_DAY:
+                    continue
                 staff = staff_by_name.get(sname)
                 if not staff:
                     continue
@@ -853,4 +908,5 @@ def generate_schedule(
         total_cost=total_cost(),
         budget=budget,
         staff_stats=staff_stats,
+        period_cost=period_cost(),
     )
