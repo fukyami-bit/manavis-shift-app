@@ -300,9 +300,12 @@ def generate_schedule(
                     return True
         return False
 
-    def is_safe_to_remove(sname, d, s, e) -> bool:
+    def is_safe_to_remove(sname, d, s, e, replacement_category=None) -> bool:
         """このスタッフのこの日の割当を外しても、時間帯の必要人数・文理の
-        在籍・文理2日連続ルールのいずれも壊さないかを判定する"""
+        在籍・文理2日連続ルールのいずれも壊さないかを判定する。
+        replacement_categoryに外す人と同じカテゴリを渡すと、代わりに
+        同カテゴリの人を入れる前提として文理系のチェックをスキップする
+        （入れ替えても在籍カテゴリの構成は変わらないため）。"""
         day = days_by_date[d]
         band_counts, categories = coverage(day, exclude_key=(sname, d))
         staff = staff_by_name.get(sname)
@@ -311,6 +314,8 @@ def generate_schedule(
         for i, b in enumerate(day_bands(day)):
             if _overlaps(s, e, b.start, b.end) and band_counts[i] < b.min_required:
                 return False
+        if replacement_category == staff.category:
+            return True
         if staff.category not in categories:
             # このスタッフを外すと当該カテゴリがその日からいなくなる
             return False
@@ -528,6 +533,9 @@ def generate_schedule(
         if not blocked_bands:
             return False  # 上限人数以外の理由（連勤上限など）ではやり取りしない
 
+        sname_staff = staff_by_name.get(sname)
+        sname_category = sname_staff.category if sname_staff else None
+
         bumped = []
         for i in blocked_bands:
             b = db[i]
@@ -537,7 +545,7 @@ def generate_schedule(
                     continue
                 if not is_bumpable(n2):
                     continue
-                if not is_safe_to_remove(n2, d2, s2, e2):
+                if not is_safe_to_remove(n2, d2, s2, e2, replacement_category=sname_category):
                     continue
                 req2 = requested_count[n2]
                 conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
@@ -721,28 +729,47 @@ def generate_schedule(
             if not added:
                 break
 
+    # 月のどこか（特に月初・月末）に偏らないようにする。確定日と確定日の
+    # 間だけでなく、月の始まり・終わりとの間も「空きすぎ」とみなして
+    # チェックする（月初だけ・月末だけに集中するのを防ぐことを優先する）。
+    month_start = days[0].date
+    month_end = days[-1].date
+
+    def _bumpable_spacing(n2, _sname):
+        # 月のどこかに偏るのを防ぐことを充足率の細かい比較より優先するため、
+        # 充足率の逆転チェックは行わない。小口保証枠(60%)だけは死守する。
+        if _is_leader(staff_by_name.get(n2)):
+            return False
+        req2 = requested_count[n2]
+        conf2 = sum(1 for (nn, _dd) in assigned if nn == n2)
+        if req2 <= SMALL_REQUEST_THRESHOLD:
+            guarantee = math.ceil(req2 * SMALL_REQUEST_RATIO_GUARANTEE)
+            return (conf2 - 1) >= guarantee
+        return True
+
     for sname, all_dates in candidate_dates_by_staff.items():
         all_dates = sorted(all_dates)
         while True:
             confirmed_dates = sorted(d for d in all_dates if (sname, d) in assigned)
-            if len(confirmed_dates) < 2:
-                break
+            anchors = [month_start] + confirmed_dates + [month_end]
             added_any = False
-            for i in range(len(confirmed_dates) - 1):
-                gap_days = (confirmed_dates[i + 1] - confirmed_dates[i]).days
+            for i in range(len(anchors) - 1):
+                lo, hi = anchors[i], anchors[i + 1]
+                gap_days = (hi - lo).days
                 if gap_days <= 7:
                     continue
                 gap_candidates = [
                     d for d in all_dates
-                    if confirmed_dates[i] < d < confirmed_dates[i + 1] and (sname, d) not in assigned
+                    if lo <= d <= hi and (sname, d) not in assigned
                 ]
+                if not gap_candidates:
+                    continue
                 # 空白期間を最もよく2分割できる候補を優先する
                 mid_offset = gap_days / 2
-                gap_candidates.sort(key=lambda d: abs((d - confirmed_dates[i]).days - mid_offset))
+                gap_candidates.sort(key=lambda d: abs((d - lo).days - mid_offset))
                 for d in gap_candidates:
                     r, (s, e) = all_candidates[(sname, d)]
-                    if is_safe_to_add(sname, d, s, e):
-                        assigned[(sname, d)] = (r, (s, e))
+                    if try_add_with_bump(sname, d, s, e, lambda n2, _s=sname: _bumpable_spacing(n2, _s)):
                         added_any = True
                         break
                 if added_any:
