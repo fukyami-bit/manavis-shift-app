@@ -16,10 +16,7 @@ from .models import DayInfo, ScheduleResult, Staff
 
 HEADER_FILL = PatternFill("solid", fgColor="F1EFE8")
 SHORTAGE_FILL = PatternFill("solid", fgColor="FAEEDA")
-CONFIRMED_FILL = PatternFill("solid", fgColor="D9EAD3")  # 確定（採用）した希望
-TENTATIVE_FILL = PatternFill("solid", fgColor="FFF2CC")  # 仮確定の希望
 BOLD = Font(bold=True)
-CONFIRMED_FONT = Font(bold=True, color="1E7B34")
 
 
 def format_time(hours: float) -> str:
@@ -36,9 +33,9 @@ def build_template_workbook(
     result: ScheduleResult,
 ) -> openpyxl.Workbook:
     """アップロードされた元ファイルそのものをテンプレートとして使い、
-    確定した希望のセルだけ確定シフトの時間で上書きし、太字＋色付けで
-    目立たせる。採用されなかった希望はセルを消さずに元の記載をそのまま
-    残し、見比べられるようにする。罫線・列幅など他の書式は変更しない。"""
+    確定した希望のセルだけ確定シフトの時間で上書きし、太字にして目立たせる。
+    フォントの種類やサイズは元のまま変更しない。採用されなかった希望は
+    セルを消さずに元の記載をそのまま残し、見比べられるようにする。"""
     wb = openpyxl.load_workbook(original_file_obj)
     ws = wb[layout.sheet_name]
 
@@ -67,8 +64,7 @@ def build_template_workbook(
             if a.tentative:
                 text = "△" + text
             cell.value = text
-            cell.font = CONFIRMED_FONT
-            cell.fill = TENTATIVE_FILL if a.tentative else CONFIRMED_FILL
+            cell.font = cell.font.copy(bold=True)
 
     ws2 = wb.create_sheet("時間帯一覧")
     _build_timeline_sheet(ws2, days, result)
