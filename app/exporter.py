@@ -16,7 +16,10 @@ from .models import DayInfo, ScheduleResult, Staff
 
 HEADER_FILL = PatternFill("solid", fgColor="F1EFE8")
 SHORTAGE_FILL = PatternFill("solid", fgColor="FAEEDA")
+CONFIRMED_FILL = PatternFill("solid", fgColor="D9EAD3")  # 確定（採用）した希望
+TENTATIVE_FILL = PatternFill("solid", fgColor="FFF2CC")  # 仮確定の希望
 BOLD = Font(bold=True)
+CONFIRMED_FONT = Font(bold=True, color="1E7B34")
 
 
 def format_time(hours: float) -> str:
@@ -33,8 +36,9 @@ def build_template_workbook(
     result: ScheduleResult,
 ) -> openpyxl.Workbook:
     """アップロードされた元ファイルそのものをテンプレートとして使い、
-    希望が入っていたセルを確定シフトで上書きする。フォント・罫線・列幅・
-    色などの元の書式は変更しない。"""
+    確定した希望のセルだけ確定シフトの時間で上書きし、太字＋色付けで
+    目立たせる。採用されなかった希望はセルを消さずに元の記載をそのまま
+    残し、見比べられるようにする。罫線・列幅など他の書式は変更しない。"""
     wb = openpyxl.load_workbook(original_file_obj)
     ws = wb[layout.sheet_name]
 
@@ -57,12 +61,14 @@ def build_template_workbook(
             cell = ws.cell(row=row, column=col_idx)
             a = by_day_staff.get((day.date, name))
             if a is None:
-                cell.value = None
+                # 採用されなかった希望は消さず、元の記載をそのまま残す
                 continue
             text = f"{a.start:g}-{a.end:g}"
             if a.tentative:
                 text = "△" + text
             cell.value = text
+            cell.font = CONFIRMED_FONT
+            cell.fill = TENTATIVE_FILL if a.tentative else CONFIRMED_FILL
 
     ws2 = wb.create_sheet("時間帯一覧")
     _build_timeline_sheet(ws2, days, result)

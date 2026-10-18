@@ -293,7 +293,10 @@ if st.session_state.step == "result" and not is_cost_mode and "result" in st.ses
         st.progress(v["ratio"], text=f"{name}: {v['confirmed']}/{v['requested']}日 ({v['ratio']*100:.0f}%)")
 
     st.subheader("Excelとして出力")
-    st.caption("アップロードされた元ファイルと同じ書式（罫線・列幅・色）のまま、希望欄を確定シフトで上書きします")
+    st.caption(
+        "アップロードされた元ファイルと同じ書式（罫線・列幅・色）のまま、採用した希望のセルだけ確定シフトの時間に"
+        "書き換えて色付け・太字にします（緑=確定、黄=仮確定）。採用されなかった希望は消さずにそのまま残ります。"
+    )
     month_label = parsed.days[0].date.strftime("%Y年%m月")
     wb = build_template_workbook(
         io.BytesIO(st.session_state.original_bytes), parsed.layout, staff_list, parsed.days, result,
