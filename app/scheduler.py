@@ -111,12 +111,13 @@ def compute_period_cost(
     """確定済みシフトのうち、日付が[min_day, max_day]（各月の日にち）の
     範囲内にあるものだけの人件費を集計する。前月シフトの26日〜月末分の
     繰越コストや、当月シフトの1〜25日分・26日〜月末分を個別に計算する
-    のに使う。"""
+    のに使う。太字（確定扱い）のセルのみを対象とし、採用されなかった
+    希望が残っているセル（太字でないもの）はカウントしない。"""
     staff_by_name = {s.name: s for s in staff_list}
     days_by_date = {d.date: d for d in days}
     total = 0.0
     for r in requests:
-        if not r.has_range():
+        if not r.has_range() or not r.bold:
             continue
         if not (min_day <= r.date.day <= max_day):
             continue
@@ -140,13 +141,15 @@ def compute_cost_from_shift(
     requests: list[RequestEntry],
 ) -> ScheduleResult:
     """すでに確定・手直し済みのシフト表を読み取り、シフトの組み直しはせず
-    そのまま人件費だけを集計する（修正後の人件費確認用）。"""
+    そのまま人件費だけを集計する（修正後の人件費確認用）。太字（確定扱い）
+    のセルのみを集計対象とし、採用されなかった希望が残っているセル
+    （太字でないもの）は人件費に含めない。"""
     staff_by_name = {s.name: s for s in staff_list}
     days_by_date = {d.date: d for d in days}
 
     assignments = []
     for r in requests:
-        if not r.has_range():
+        if not r.has_range() or not r.bold:
             continue
         day = days_by_date.get(r.date)
         if day is None:

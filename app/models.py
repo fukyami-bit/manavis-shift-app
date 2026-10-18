@@ -42,6 +42,7 @@ class RequestEntry:
     end: Optional[float] = None
     tentative: bool = False
     note: Optional[str] = None
+    bold: bool = False  # セルが太字か（確定シフトExcelでは太字=確定した希望）
 
     def has_range(self) -> bool:
         return self.type in ("range", "full_day")

@@ -206,10 +206,11 @@ def parse_workbook(file_obj, hourly_wage_overrides: dict | None = None, default_
         days.append(DayInfo(date=d, weekday=weekday, open_start=open_start, open_end=open_end, special_note=special_note))
 
         for col_idx, name, _cat, _wage in staff_columns:
-            raw_val = ws.cell(row=r, column=col_idx).value
-            entry = parse_cell(raw_val)
+            cell = ws.cell(row=r, column=col_idx)
+            entry = parse_cell(cell.value)
             entry.staff = name
             entry.date = d
+            entry.bold = bool(cell.font and cell.font.bold)
             if entry.type == "unknown":
                 warnings.append(f"{d} {name}: 「{entry.raw}」の形式を認識できませんでした（手動確認推奨）")
             if entry.type != "none":

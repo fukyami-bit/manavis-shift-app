@@ -116,6 +116,11 @@ def render_previous_month_uploader(uploader_key: str, staff_wages: dict) -> floa
     prev_staff = [
         replace(s, hourly_wage=staff_wages.get(s.name, s.hourly_wage)) for s in prev_parsed.staff
     ]
+    tail_requests = [r for r in prev_parsed.requests if r.has_range() and r.date.day >= 26]
+    if tail_requests and not any(r.bold for r in tail_requests):
+        st.warning(
+            "前月シフトの26日〜月末分に太字（確定）のセルが見つかりませんでした。繰越人件費は0円になります。"
+        )
     carryover = compute_period_cost(prev_staff, prev_parsed.days, prev_parsed.requests, min_day=26, max_day=31)
     st.info(f"前月26日〜月末分の人件費（今回への繰越分）: ¥{int(carryover):,}")
     return carryover
@@ -132,6 +137,14 @@ if st.session_state.step in ("configure", "result") and "parsed" in st.session_s
 
         if st.button("人件費を計算", type="primary"):
             staff_with_wages = [replace(s, hourly_wage=st.session_state.wages[s.name]) for s in parsed.staff]
+            has_range = any(r.has_range() for r in parsed.requests)
+            has_bold = any(r.has_range() and r.bold for r in parsed.requests)
+            if has_range and not has_bold:
+                st.warning(
+                    "太字（確定）のセルが見つかりませんでした。人件費は0円になります。"
+                    "「新しいシフトを作成する」で出力したファイル、または確定した希望を太字にした"
+                    "ファイルをアップロードしてください。"
+                )
             st.session_state.cost_result = compute_cost_from_shift(staff_with_wages, parsed.days, parsed.requests)
             st.session_state.carryover_cost = carryover_cost
             st.session_state.current_period_cost = compute_period_cost(
